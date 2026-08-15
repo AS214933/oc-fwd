@@ -1,0 +1,10 @@
+services:
+  zenproxy:
+    build: .
+    image: ghcr.io/${GHCR_OWNER:-your-ghcr-owner}/${GHCR_IMAGE:-zen-proxy}:latest
+    container_name: zenproxy
+    restart: unless-stopped
+    ports:
+      - "${LISTEN_PORT:-8080}:8080"
+    env_file:
+      - .env

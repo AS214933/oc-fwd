@@ -1,0 +1,546 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math"
+	mrand "math/rand"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/net/proxy"
+)
+
+var errCircuitOpen = errors.New("upstream rate limit circuit is open")
+
+type Proxy struct {
+	cfg     Config
+	log     *slog.Logger
+	client  *http.Client
+	circuit *Circuit
+	sem     chan struct{}
+	rnd     *mrand.Rand
+	rndMu   sync.Mutex
+}
+
+func newProxy(cfg Config, log *slog.Logger) (*Proxy, error) {
+	tr := &http.Transport{
+		MaxIdleConns:          2000,
+		MaxIdleConnsPerHost:   512,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ForceAttemptHTTP2:     true,
+		// No total ResponseHeaderTimeout: prefill for very long prompts can
+		// take minutes and streaming responses stay open for a long time.
+	}
+	if cfg.Socks5 != "" {
+		dialer, err := newSocks5Dialer(cfg.Socks5)
+		if err != nil {
+			return nil, err
+		}
+		tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.Dial(network, address)
+		}
+	}
+	client := &http.Client{Transport: tr} // per-request timeout applied in doUpstream
+	var sem chan struct{}
+	if cfg.MaxConcurrency > 0 {
+		sem = make(chan struct{}, cfg.MaxConcurrency)
+	}
+	return &Proxy{
+		cfg:     cfg,
+		log:     log,
+		client:  client,
+		circuit: newCircuit(cfg.CircuitFailures, cfg.CircuitCooldown),
+		sem:     sem,
+		rnd:     mrand.New(mrand.NewSource(time.Now().UnixNano())),
+	}, nil
+}
+
+func newSocks5Dialer(s string) (proxy.Dialer, error) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ZEN_SOCKS5: %w", err)
+	}
+	if u.Scheme != "socks5" && u.Scheme != "socks5h" {
+		return nil, fmt.Errorf("invalid ZEN_SOCKS5 scheme %q (want socks5://)", u.Scheme)
+	}
+	var auth *proxy.Auth
+	if u.User != nil {
+		auth = &proxy.Auth{User: u.User.Username()}
+		auth.Password, _ = u.User.Password()
+	}
+	host := u.Host
+	if u.Port() == "" {
+		host = net.JoinHostPort(u.Hostname(), "1080")
+	}
+	return proxy.SOCKS5("tcp", host, auth, proxy.Direct)
+}
+
+// Handler builds the full HTTP routing table.
+func (p *Proxy) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", p.requireAuth(p.handleCompletion("/chat/completions")))
+	mux.HandleFunc("POST /v1/responses", p.requireAuth(p.handleCompletion("/responses")))
+	mux.HandleFunc("GET /v1/models", p.requireAuth(p.handleModels))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		io.WriteString(w, "ok")
+	})
+	return p.logMiddleware(mux)
+}
+
+// requireAuth enforces the optional caller API key (ZEN_AUTH_KEY).
+func (p *Proxy) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if p.cfg.AuthKey != "" && !validCallerKey(r, p.cfg.AuthKey) {
+			writeError(w, http.StatusUnauthorized, "Invalid API key", "invalid_api_key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func validCallerKey(r *http.Request, want string) bool {
+	got := ""
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		got = strings.TrimSpace(h[len("Bearer "):])
+	} else if h := r.Header.Get("x-api-key"); h != "" {
+		got = strings.TrimSpace(h)
+	}
+	if got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+type completionMeta struct {
+	Model  string `json:"model"`
+	Stream bool   `json:"stream"`
+}
+
+func (p *Proxy) handleCompletion(upstreamPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, p.cfg.MaxBodyBytes))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "request body too large or unreadable", "invalid_request_error")
+			return
+		}
+		var meta completionMeta
+		if err := json.Unmarshal(body, &meta); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error")
+			return
+		}
+		upstreamModel, ok := p.resolveModel(meta.Model)
+		if !ok {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("model %q is not allowed by this proxy", meta.Model), "model_not_found")
+			return
+		}
+		// Rewrite the model field in the upstream request when aliased.
+		rewrite := upstreamModel != meta.Model
+		if rewrite {
+			body = rewriteBodyModel(body, upstreamModel)
+		}
+
+		if p.sem != nil {
+			select {
+			case p.sem <- struct{}{}:
+				defer func() { <-p.sem }()
+			case <-r.Context().Done():
+				return
+			}
+		}
+
+		resp, err := p.doUpstream(r.Context(), upstreamPath, body, meta.Stream)
+		if err != nil {
+			status := http.StatusBadGateway
+			msg := "upstream request failed: " + err.Error()
+			if errors.Is(err, errCircuitOpen) {
+				status = http.StatusTooManyRequests
+				msg = "upstream temporarily rate limited (circuit open)"
+			}
+			writeError(w, status, msg, "upstream_error")
+			return
+		}
+		defer resp.Body.Close()
+
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.Header().Set("X-Zen-Proxy", "1")
+
+		if resp.StatusCode != http.StatusOK {
+			// Forward non-200 responses (including the final 429) untouched.
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
+			return
+		}
+
+		if meta.Stream || isSSE(resp) {
+			alias := ""
+			if rewrite {
+				alias = meta.Model
+			}
+			w.WriteHeader(http.StatusOK)
+			p.copyStream(w, r.Context(), resp.Body, alias)
+			return
+		}
+
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			p.log.Error("read upstream body", "error", err)
+			return
+		}
+		if rewrite {
+			data = rewriteResponseModel(data, meta.Model)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+	}
+}
+
+// resolveModel maps an incoming model id to an upstream model id.
+// With no ZEN_MODELS / ZEN_MODEL_MAP configured everything passes through.
+func (p *Proxy) resolveModel(clientModel string) (string, bool) {
+	if clientModel == "" {
+		return "", false
+	}
+	if up, ok := p.cfg.ModelMap[clientModel]; ok {
+		return up, true
+	}
+	if len(p.cfg.Models) > 0 {
+		for _, m := range p.cfg.Models {
+			if m == clientModel {
+				return clientModel, true
+			}
+		}
+		return "", false
+	}
+	return clientModel, true // allow any model when no restriction configured
+}
+
+func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
+	seen := map[string]bool{}
+	ids := []string{}
+	created := time.Now().Unix()
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for _, m := range p.cfg.Models {
+		add(m)
+	}
+	for alias := range p.cfg.ModelMap {
+		add(alias)
+	}
+	payload := map[string]any{
+		"object": "list",
+		"data":   []any{},
+	}
+	if len(ids) > 0 {
+		items := make([]map[string]any, 0, len(ids))
+		for _, id := range ids {
+			items = append(items, map[string]any{
+				"id":       id,
+				"object":   "model",
+				"created":  created,
+				"owned_by": "zen-proxy",
+			})
+		}
+		payload["data"] = items
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payload)
+}
+
+// doUpstream sends the request to opencode zen, retrying on 429 with
+// exponential backoff (+ jitter), honoring Retry-After, and opening the
+// circuit breaker after consecutive 429s so the upstream is shielded.
+func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream bool) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		if !p.circuit.Allow() {
+			return nil, errCircuitOpen
+		}
+
+		reqCtx := ctx
+		var cancel context.CancelFunc = func() {}
+		if !stream && p.cfg.UpstreamTimeoutSet {
+			reqCtx, cancel = context.WithTimeout(ctx, p.cfg.UpstreamTimeout)
+		}
+
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, p.cfg.UpstreamBase+path, bytes.NewReader(body))
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "zen-proxy/1.0")
+		if p.cfg.UpstreamAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+p.cfg.UpstreamAPIKey)
+		}
+		if stream {
+			req.Header.Set("Accept", "text/event-stream")
+		}
+
+		resp, err := p.client.Do(req)
+		if err != nil {
+			cancel()
+			p.log.Debug("upstream attempt failed", "attempt", attempt, "error", err)
+			wait, ok := p.backoff(attempt, 0)
+			if !ok {
+				return nil, err
+			}
+			if err := sleepCtx(ctx, wait); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			ra := retryAfterSeconds(resp)
+			p.circuit.RecordFailure()
+			resp.Body.Close()
+			cancel()
+			wait, ok := p.backoff(attempt, ra)
+			p.log.Warn("upstream returned 429", "attempt", attempt, "retry_after_s", ra, "wait", wait)
+			if !ok {
+				return newRateLimitResponse(ra), nil
+			}
+			if err := sleepCtx(ctx, wait); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		p.circuit.RecordSuccess()
+		resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+		return resp, nil
+	}
+}
+
+func (p *Proxy) backoff(attempt int, retryAfter int) (time.Duration, bool) {
+	if attempt >= p.cfg.RetryMax {
+		return 0, false
+	}
+	if retryAfter > 0 {
+		d := time.Duration(retryAfter) * time.Second
+		if d > p.cfg.RetryMaxBackoff {
+			d = p.cfg.RetryMaxBackoff
+		}
+		return d, true
+	}
+	base := p.cfg.RetryBaseBackoff
+	mult := 1 << uint(math.Min(float64(attempt), 20))
+	d := base * time.Duration(mult)
+	p.rndMu.Lock()
+	jitter := time.Duration(p.rnd.Int63n(int64(p.cfg.RetryBaseBackoff/2) + 1))
+	p.rndMu.Unlock()
+	d += jitter
+	if d > p.cfg.RetryMaxBackoff {
+		d = p.cfg.RetryMaxBackoff
+	}
+	return d, true
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func retryAfterSeconds(resp *http.Response) int {
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func newRateLimitResponse(retryAfter int) *http.Response {
+	msg := "Upstream rate limit exceeded after retries."
+	if retryAfter > 0 {
+		msg += fmt.Sprintf(" Retry-After: %ds.", retryAfter)
+	}
+	b, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    "rate_limit_error",
+			"param":   nil,
+			"code":    "rate_limit_exceeded",
+		},
+	})
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	return &http.Response{
+		StatusCode:    http.StatusTooManyRequests,
+		Header:        h,
+		Body:          io.NopCloser(bytes.NewReader(b)),
+		ContentLength: int64(len(b)),
+		Request:       nil,
+	}
+}
+
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
+func isSSE(resp *http.Response) bool {
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	return strings.Contains(ct, "text/event-stream")
+}
+
+// copyStream relays an SSE stream, optionally rewriting the model field of
+// each JSON data chunk back to the alias the caller used.
+func (p *Proxy) copyStream(w http.ResponseWriter, ctx context.Context, src io.Reader, alias string) {
+	flusher, _ := w.(http.Flusher)
+	br := bufio.NewReaderSize(src, 64*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			out := line
+			if alias != "" {
+				if trimmed := bytes.TrimSpace(line); bytes.HasPrefix(trimmed, []byte("data:")) {
+					payload := bytes.TrimSpace(trimmed[len("data:"):])
+					if len(payload) > 0 && payload[0] == '{' {
+						rewritten := rewriteResponseModel(payload, alias)
+						out = append(append([]byte("data: "), rewritten...), '\n')
+					}
+				}
+			}
+			if _, werr := w.Write(out); werr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			p.log.Debug("stream read error", "error", err)
+			return
+		}
+	}
+}
+
+// rewriteBodyModel replaces the "model" field of a JSON request body.
+func rewriteBodyModel(body []byte, model string) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	b, err := json.Marshal(model)
+	if err != nil {
+		return body
+	}
+	m["model"] = b
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// rewriteResponseModel replaces the "model" field of a JSON response body.
+func rewriteResponseModel(data []byte, model string) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return data
+	}
+	b, err := json.Marshal(model)
+	if err != nil {
+		return data
+	}
+	m["model"] = b
+	out, err := json.Marshal(m)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+func writeError(w http.ResponseWriter, status int, msg, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    "invalid_request_error",
+			"param":   nil,
+			"code":    code,
+		},
+	})
+}
+
+// logMiddleware adds request logging and a request id.
+func (p *Proxy) logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		reqID := r.Header.Get("X-Request-Id")
+		if reqID == "" {
+			reqID = newRequestID()
+		}
+		w.Header().Set("X-Request-Id", reqID)
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		p.log.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"req_id", reqID,
+		)
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func newRequestID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}

@@ -1,0 +1,6 @@
+.git
+.env
+*.log
+zen-proxy
+Dockerfile
+docker-compose.yml

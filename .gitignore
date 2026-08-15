@@ -1,0 +1,5 @@
+zen-proxy
+zenproxy
+.env
+*.log
+coverage.out
