@@ -91,12 +91,39 @@ func (p *Proxy) handleCompletion(format string) http.HandlerFunc {
 			return
 		}
 
+		toResponses := force && format == "responses"
+
 		if meta.Stream || isSSE(resp) {
+			if toResponses && !isSSE(resp) {
+				// Upstream ignored stream=true and returned a single JSON
+				// chat.completion: convert and emit it as a minimal SSE
+				// sequence so /v1/responses clients still get valid events.
+				data, rerr := io.ReadAll(resp.Body)
+				if rerr != nil {
+					p.log.Error("read upstream body", "error", rerr)
+					return
+				}
+				conv, cerr := convertChatToResponses(data)
+				if cerr != nil {
+					p.log.Error("convert chat completions to responses", "error", cerr)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				writeResponsesJSONEvents(w, r.Context(), conv)
+				return
+			}
+			if toResponses {
+				w.Header().Set("Content-Type", "text/event-stream")
+			}
+			w.WriteHeader(http.StatusOK)
+			if toResponses {
+				p.copyResponsesStream(w, r.Context(), resp.Body)
+				return
+			}
 			alias := ""
 			if rewrite {
 				alias = meta.Model
 			}
-			w.WriteHeader(http.StatusOK)
 			p.copyStream(w, r.Context(), resp.Body, alias)
 			return
 		}
@@ -105,6 +132,15 @@ func (p *Proxy) handleCompletion(format string) http.HandlerFunc {
 		if err != nil {
 			p.log.Error("read upstream body", "error", err)
 			return
+		}
+		if toResponses {
+			converted, cerr := convertChatToResponses(data)
+			if cerr != nil {
+				p.log.Error("convert chat completions to responses", "error", cerr)
+			} else {
+				data = converted
+				w.Header().Set("Content-Type", "application/json")
+			}
 		}
 		if rewrite {
 			data = rewriteResponseModel(data, meta.Model)

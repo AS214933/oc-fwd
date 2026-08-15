@@ -752,3 +752,129 @@ func TestRotateIPOffReusesConnection(t *testing.T) {
 		t.Fatalf("expected keep-alive reuse with rotate off, got %d handshakes for 3 requests", got)
 	}
 }
+
+func TestForceResponsesReturnsResponsesFormat(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"id":"chatcmpl-1","object":"chat.completion","model":"deepseek-v4-flash-free",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}
+		}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.ForceChatCompletions = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/responses",
+		`{"model":"deepseek-v4-flash-free","instructions":"be nice",
+		  "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":false}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not JSON: %v body=%s", err, rec.Body.String())
+	}
+	if got["object"] != "response" {
+		t.Fatalf("client should get a responses-format object, got: %s", rec.Body.String())
+	}
+	output, _ := got["output"].([]any)
+	if len(output) == 0 {
+		t.Fatalf("no output items: %s", rec.Body.String())
+	}
+}
+
+func TestForceResponsesStreamsResponsesFormat(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		chunks := []string{
+			`data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}`,
+			`data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}
+		for _, c := range chunks {
+			fmt.Fprint(w, c+"\n\n")
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.ForceChatCompletions = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/responses",
+		`{"model":"deepseek-v4-flash-free",
+		  "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	var types []string
+	var deltas []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var ev struct {
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			t.Fatalf("client got non-JSON SSE data %q", line)
+		}
+		types = append(types, ev.Type)
+		if ev.Type == "response.output_text.delta" {
+			deltas = append(deltas, ev.Delta)
+		}
+	}
+	joined := strings.Join(types, ",")
+	if !strings.Contains(joined, "response.created") || !strings.Contains(joined, "response.completed") {
+		t.Fatalf("stream is not responses format: %s", body)
+	}
+	if got := strings.Join(deltas, ""); got != "Hello world" {
+		t.Fatalf("deltas = %q body=%s", got, body)
+	}
+}
+
+func TestForceResponsesStreamRequestUpstreamIgnoresStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Upstream ignores stream=true and returns a plain JSON completion.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-1","object":"chat.completion","model":"deepseek-v4-flash-free",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.ForceChatCompletions = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/responses",
+		`{"model":"deepseek-v4-flash-free",
+		  "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("content-type = %q", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "response.created") || !strings.Contains(body, "response.completed") {
+		t.Fatalf("expected responses SSE events, got: %s", body)
+	}
+	if strings.Contains(body, "chat.completion") {
+		t.Fatalf("chat format leaked: %s", body)
+	}
+}

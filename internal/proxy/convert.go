@@ -17,8 +17,16 @@ type chatBody struct {
 }
 
 type chatMsg struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+}
+
+type chatToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function chatToolFunc `json:"function"`
 }
 
 type chatTool struct {
@@ -30,6 +38,95 @@ type chatToolFunc struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Arguments   json.RawMessage `json:"arguments,omitempty"`
+}
+
+// convertChatToResponses converts an upstream Chat Completions response body
+// (chat.completion) back into the OpenAI Responses API shape so that clients
+// that speak /v1/responses (codex, opencode, ...) can parse what we return
+// even though upstream only gives us chat completions.
+func convertChatToResponses(body []byte) ([]byte, error) {
+	var in struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Model   string `json:"model"`
+		Created int64  `json:"created"`
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Role      string `json:"role"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		return nil, err
+	}
+	if len(in.Choices) == 0 {
+		return nil, fmt.Errorf("chat completion response has no choices")
+	}
+	ch := in.Choices[0]
+
+	out := map[string]any{
+		"id":         "resp_1",
+		"object":     "response",
+		"created_at": in.Created,
+		"status":     "completed",
+		"model":      in.Model,
+	}
+	usage := map[string]any{}
+	if in.Usage != nil {
+		usage = map[string]any{
+			"input_tokens":  in.Usage.PromptTokens,
+			"output_tokens": in.Usage.CompletionTokens,
+			"total_tokens":  in.Usage.TotalTokens,
+		}
+	}
+	out["usage"] = usage
+
+	var output []any
+	if ch.Message.Content != "" || len(ch.Message.ToolCalls) == 0 {
+		output = append(output, map[string]any{
+			"id":      "msg_1",
+			"type":    "message",
+			"status":  "completed",
+			"role":    assistantRole(ch.Message.Role),
+			"content": []any{map[string]any{"type": "output_text", "text": ch.Message.Content, "annotations": []any{}}},
+		})
+	}
+	for i, tc := range ch.Message.ToolCalls {
+		output = append(output, map[string]any{
+			"id":        fmt.Sprintf("fc_%d", i+1),
+			"type":      "function_call",
+			"status":    "completed",
+			"call_id":   tc.ID,
+			"name":      tc.Function.Name,
+			"arguments": tc.Function.Arguments,
+		})
+	}
+	out["output"] = output
+	return json.Marshal(out)
+}
+
+func assistantRole(role string) string {
+	if role == "" {
+		return "assistant"
+	}
+	return role
 }
 
 // convertToChatCompletions normalizes an incoming /v1/responses or /v1/messages
@@ -81,10 +178,15 @@ func convertResponsesToChat(body []byte) ([]byte, error) {
 		}
 		for _, raw := range items {
 			var it struct {
-				Type    string          `json:"type"`
-				Role    string          `json:"role"`
-				Content json.RawMessage `json:"content"`
-				Text    string          `json:"text"`
+				Type      string          `json:"type"`
+				Role      string          `json:"role"`
+				Content   json.RawMessage `json:"content"`
+				Text      string          `json:"text"`
+				ID        string          `json:"id"`
+				CallID    string          `json:"call_id"`
+				Name      string          `json:"name"`
+				Arguments string          `json:"arguments"`
+				Output    string          `json:"output"`
 			}
 			if err := json.Unmarshal(raw, &it); err != nil {
 				// OpenAI responses input arrays may contain plain strings.
@@ -95,7 +197,36 @@ func convertResponsesToChat(body []byte) ([]byte, error) {
 				}
 				return nil, fmt.Errorf("unsupported responses input item: %w", err)
 			}
-			if it.Type == "function_call" || it.Type == "function_call_output" {
+			if it.Type == "function_call" {
+				// Assistant tool call -> assistant message with tool_calls.
+				// The responses call_id is reused as the chat tool_call_id so
+				// that a following function_call_output maps 1:1 (and the
+				// round-trip with tool results stays consistent). Chat
+				// Completions wants the arguments as a JSON-encoded string.
+				args, _ := json.Marshal(it.Arguments)
+				out.Messages = append(out.Messages, chatMsg{
+					Role: "assistant",
+					ToolCalls: []chatToolCall{{
+						ID:   it.CallID,
+						Type: "function",
+						Function: chatToolFunc{
+							Name:      it.Name,
+							Arguments: args,
+						},
+					}},
+				})
+				continue
+			}
+			if it.Type == "function_call_output" {
+				toolID := it.CallID
+				if toolID == "" {
+					toolID = it.ID
+				}
+				out.Messages = append(out.Messages, chatMsg{
+					Role:       "tool",
+					ToolCallID: toolID,
+					Content:    it.Output,
+				})
 				continue
 			}
 			if it.Text != "" {

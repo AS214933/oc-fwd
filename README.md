@@ -102,10 +102,11 @@ curl http://localhost:8080/debug/upstream-ip
 
 ## 强制统一为 Chat Completions 转发
 
-设置 `ZEN_FORCE_CHAT_COMPLETIONS=true` 后，所有进来的请求都会以 **Chat Completions 格式**转发到上游 `/v1/chat/completions`，返回体统一为 `chat.completion`：
+设置 `ZEN_FORCE_CHAT_COMPLETIONS=true` 后，所有进来的请求都会以 **Chat Completions 格式**转发到上游 `/v1/chat/completions`：
 
 - `POST /v1/chat/completions`：原样透传（不检查模型白名单/不做别名改写）；
-- `POST /v1/responses`：自动转换为 Chat Completions（`instructions` → system 消息，`input` → user/assistant 消息，`max_output_tokens` → `max_tokens`，function tools 转换后透传）；
+- `POST /v1/responses`：自动转换为 Chat Completions（`instructions` → system 消息，`input` → user/assistant 消息，`max_output_tokens` → `max_tokens`，function tools 转换后透传）；**响应再转回 Responses API 格式**返回给客户端：非流式返回 `response` 对象（`output` 含 message / function_call 输出项），流式输出标准 Responses SSE 事件（`response.created` / `response.output_text.delta` / `response.function_call_arguments.delta` / `response.completed` 等），因此 codex、opencode 等用 `/v1/responses` 的客户端可以正常解析；
+- 工具调用双向转换：`function_call` → 带 `tool_calls` 的 assistant 消息、`function_call_output` → `role=tool` 消息，`call_id` 原样保留（上游 `tool_calls` 的 id 即为客户端 `call_id`）；
 - `POST /v1/messages`（Anthropic）：`system`/`messages`/`tools`/`max_tokens` 转换为 Chat Completions 等价字段；
 - 图片等非文本 content 会在转换时忽略（当前为纯文本转换）。
 
