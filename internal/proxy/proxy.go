@@ -34,6 +34,8 @@ type Proxy struct {
 	sem     chan struct{}
 	rnd     *mrand.Rand
 	rndMu   sync.Mutex
+	keys    *keyRing
+	fb      fallbackState
 }
 
 func New(cfg config.Config, log *slog.Logger) (*Proxy, error) {
@@ -75,14 +77,19 @@ func New(cfg config.Config, log *slog.Logger) (*Proxy, error) {
 	if cfg.MaxConcurrency > 0 {
 		sem = make(chan struct{}, cfg.MaxConcurrency)
 	}
-	return &Proxy{
+	p := &Proxy{
 		cfg:     cfg,
 		log:     log,
 		client:  client,
 		circuit: circuit.New(cfg.CircuitFailures, cfg.CircuitCooldown),
 		sem:     sem,
 		rnd:     mrand.New(mrand.NewSource(time.Now().UnixNano())),
-	}, nil
+	}
+	if len(cfg.APIKeys) > 0 {
+		p.keys = newKeyRing(cfg.APIKeys)
+		go p.probeLoop()
+	}
+	return p, nil
 }
 
 // Handler builds the full HTTP routing table.

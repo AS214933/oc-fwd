@@ -15,6 +15,14 @@ import (
 func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream bool) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		if !p.circuit.Allow() {
+			// An open breaker can strand anonymous mode (the requests never
+			// reach the give-up points below). Count it as a no-key failure
+			// so a persistent 429 storm still trips the API-key fallback.
+			if p.recordNoKeyFailure() {
+				p.circuit.Reset()
+				attempt = -1
+				continue
+			}
 			return nil, errCircuitOpen
 		}
 
@@ -32,8 +40,8 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "zen-proxy/1.0")
-		if p.cfg.UpstreamAPIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+p.cfg.UpstreamAPIKey)
+		if key, ok := p.requestKey(); ok {
+			req.Header.Set("Authorization", "Bearer "+key)
 		}
 		if stream {
 			req.Header.Set("Accept", "text/event-stream")
@@ -45,6 +53,12 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 			p.log.Debug("upstream attempt failed", "attempt", attempt, "error", err)
 			wait, ok := p.backoff(attempt, 0)
 			if !ok {
+				if p.recordNoKeyFailure() {
+					// Anonymous mode is down and the threshold was reached:
+					// retry this very request with an API key, transparently.
+					attempt = -1
+					continue
+				}
 				return nil, err
 			}
 			if err := sleepCtx(ctx, wait); err != nil {
@@ -61,6 +75,11 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 			wait, ok := p.backoff(attempt, ra)
 			p.log.Warn("upstream returned 429", "attempt", attempt, "retry_after_s", ra, "wait", wait)
 			if !ok {
+				if p.recordNoKeyFailure() {
+					p.circuit.Reset()
+					attempt = -1
+					continue
+				}
 				return newRateLimitResponse(ra), nil
 			}
 			if err := sleepCtx(ctx, wait); err != nil {
@@ -69,7 +88,19 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 			continue
 		}
 
+		if resp.StatusCode >= 500 {
+			p.log.Warn("upstream returned server error", "status", resp.StatusCode)
+			if p.recordNoKeyFailure() {
+				resp.Body.Close()
+				cancel()
+				p.circuit.Reset()
+				attempt = -1
+				continue
+			}
+		}
+
 		p.circuit.RecordSuccess()
+		p.recordNoKeySuccess()
 		resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 		return resp, nil
 	}

@@ -17,6 +17,10 @@ type Config struct {
 	Socks5               string // optional: socks5://user:pass@host:port
 	Models               []string
 	ModelMap             map[string]string // alias -> upstream model id
+	APIKeysFile          string            // file with one API key per line
+	APIKeys              []string          // keys loaded from APIKeysFile
+	NoKeyFailThreshold   int               // consecutive no-key failures before fallback
+	NoKeyProbeInterval   time.Duration     // how often to probe no-key recovery
 	AuthKey              string            // optional: key callers must present
 	RetryMax             int
 	RetryBaseBackoff     time.Duration
@@ -84,12 +88,36 @@ func parseModelMap(s string) (map[string]string, error) {
 	return m, nil
 }
 
+// loadKeysFile reads a file containing one API key per line. Blank lines and
+// lines starting with '#' are ignored, surrounding whitespace is trimmed.
+func loadKeysFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read ZEN_API_KEYS_FILE %q: %w", path, err)
+	}
+	var keys []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		keys = append(keys, line)
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("ZEN_API_KEYS_FILE %q contains no keys", path)
+	}
+	return keys, nil
+}
+
 func Load() (Config, error) {
 	cfg := Config{
 		Listen:               envStr("LISTEN_ADDR", ":8080"),
 		UpstreamBase:         strings.TrimRight(envStr("ZEN_UPSTREAM", "https://opencode.ai/zen/v1"), "/"),
 		UpstreamAPIKey:       envStr("ZEN_UPSTREAM_API_KEY", ""),
 		Socks5:               envStr("ZEN_SOCKS5", ""),
+		APIKeysFile:          envStr("ZEN_API_KEYS_FILE", ""),
+		NoKeyFailThreshold:   envInt("ZEN_NO_KEY_FAIL_THRESHOLD", 3),
+		NoKeyProbeInterval:   envSeconds("ZEN_NO_KEY_PROBE_SECONDS", 3),
 		AuthKey:              envStr("ZEN_AUTH_KEY", ""),
 		RetryMax:             envInt("ZEN_RETRY_MAX", 3),
 		RetryBaseBackoff:     envSeconds("ZEN_RETRY_BACKOFF_SECONDS", 2),
@@ -117,6 +145,20 @@ func Load() (Config, error) {
 		m = strings.TrimSpace(m)
 		if m != "" {
 			cfg.Models = append(cfg.Models, m)
+		}
+	}
+	if cfg.APIKeysFile != "" {
+		cfg.APIKeys, err = loadKeysFile(cfg.APIKeysFile)
+		if err != nil {
+			return cfg, err
+		}
+	}
+	if len(cfg.APIKeys) > 0 {
+		if cfg.NoKeyFailThreshold < 1 {
+			return cfg, fmt.Errorf("invalid ZEN_NO_KEY_FAIL_THRESHOLD %d: must be >= 1", cfg.NoKeyFailThreshold)
+		}
+		if cfg.NoKeyProbeInterval <= 0 {
+			return cfg, fmt.Errorf("invalid ZEN_NO_KEY_PROBE_SECONDS %d: must be > 0", cfg.NoKeyProbeInterval/time.Second)
 		}
 	}
 	if cfg.Listen == "" {

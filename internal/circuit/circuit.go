@@ -54,3 +54,12 @@ func (c *Circuit) RecordSuccess() {
 	defer c.mu.Unlock()
 	c.failures = 0
 }
+
+// Reset clears the breaker state, e.g. after switching between anonymous and
+// API-key upstream modes so the new mode starts with a fresh budget.
+func (c *Circuit) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failures = 0
+	c.openedAt = time.Time{}
+}

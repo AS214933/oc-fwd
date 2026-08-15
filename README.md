@@ -53,6 +53,9 @@ internal/proxy/          # 代理核心
 | `ZEN_IPV6_PREFER` | `true` | 域名本地解析、IPv6 优先，失败回退 IPv4；`false` = 主机名透传给代理解析 |
 | `ZEN_FORCE_IPV6` | `false` | `true` = 强制只走 IPv6，绝不回退 IPv4；目标无 AAAA / 拨号失败直接报错（详见下文） |
 | `ZEN_ROTATE_IP` | `true` | 每请求新建一条到上游的 TCP 连接（禁用连接池）；`false` = 复用连接（更快，节省握手开销） |
+| `ZEN_API_KEYS_FILE` | 空 | API key 文件（一行一个）；配置后启用“匿名失败自动回退带 key 请求” |
+| `ZEN_NO_KEY_FAIL_THRESHOLD` | `3` | 匿名请求连续失败多少次后切换到 API key |
+| `ZEN_NO_KEY_PROBE_SECONDS` | `3` | 回退期间每多少秒探测一次匿名请求是否恢复 |
 | `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | `true` = 全部请求统一转成 Chat Completions 转发（详见下文） |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
@@ -130,6 +133,18 @@ curl http://localhost:8080/debug/upstream-ip
 `ZEN_ROTATE_IP=true`（默认）只是让每个请求都新建一条到上游的 TCP 连接（禁用 keep-alive、强制 HTTP/1.1），避免请求长时间复用同一条连接。这与 429 没有必然关系；是否需要注意连接复用，取决于你使用的上游与实际网络出口的具体策略。
 
 代价是每次请求都要重新 TCP+TLS 握手，单请求延迟略增；追求吞吐可设 `false` 复用连接。
+
+## 匿名失败自动回退 API Key
+
+设置 `ZEN_API_KEYS_FILE=/path/to/keys`（文件里一行一个 key，`#` 开头为注释）后启用：
+
+1. **默认匿名**请求（不带 key，例如 zen free）；
+2. 匿名请求**连续失败** `ZEN_NO_KEY_FAIL_THRESHOLD` 次（默认 3，指 429 / 5xx / 网络错误）后，自动切换到 API key 模式：后续请求带上文件中的 key，多个 key 轮换使用；
+3. 触发切换的**那个请求会在同一次请求内用 key 自动重试**，用户端不会收到错误，只感知到变慢；
+4. 回退期间每 `ZEN_NO_KEY_PROBE_SECONDS` 秒（默认 3）发一次**无 key 探测请求**，一旦匿名请求恢复（返回 2xx）立即切回匿名模式；
+5. 所有请求（包括探测与带 key 的请求）都走配置的 socks5 代理（若 `ZEN_SOCKS5` 已设置）。
+
+熔断器与回退联动：熔断打开时也会计入匿名失败，确保持续 429 时仍能触发回退；切换模式时熔断计数清零，新模式重新累计。
 
 ## 构建与测试
 
