@@ -84,6 +84,7 @@ func New(cfg config.Config, log *slog.Logger) (*Proxy, error) {
 		circuit: circuit.New(cfg.CircuitFailures, cfg.CircuitCooldown),
 		sem:     sem,
 		rnd:     mrand.New(mrand.NewSource(time.Now().UnixNano())),
+		fb:      fallbackState{models: map[string]*modelFallback{}},
 	}
 	if len(cfg.APIKeys) > 0 {
 		p.keys = newKeyRing(cfg.APIKeys)

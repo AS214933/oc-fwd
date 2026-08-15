@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,27 +14,40 @@ import (
 )
 
 // authTrackingServer records the Authorization header of the last request and
-// can be switched between "down" (anonymous 429) and "up" (anonymous 200).
+// can be switched between "down" (anonymous 429) and "up" (anonymous 200),
+// either globally or per model.
 type authTrackingServer struct {
-	mu       sync.Mutex
-	down     bool
-	lastAuth string
-	probes   int
-	keyed    int
+	mu        sync.Mutex
+	down      bool
+	downMap   map[string]bool
+	lastAuth  string
+	lastModel string
+	probes    int
+	keyed     int
+	keyAuths  []string
 }
 
 func (s *authTrackingServer) handler(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
+	var m struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(body, &m)
 	auth := r.Header.Get("Authorization")
 	s.mu.Lock()
 	s.lastAuth = auth
+	s.lastModel = m.Model
 	if strings.Contains(string(body), `"ping"`) && auth == "" {
 		s.probes++
 	}
 	if auth != "" {
 		s.keyed++
+		s.keyAuths = append(s.keyAuths, strings.TrimPrefix(auth, "Bearer "))
 	}
 	down := s.down
+	if m.Model != "" && s.downMap[m.Model] {
+		down = true
+	}
 	s.mu.Unlock()
 	if auth == "" && down {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -49,6 +63,12 @@ func (s *authTrackingServer) setDown(d bool) {
 	s.mu.Unlock()
 }
 
+func (s *authTrackingServer) setDownModel(model string, d bool) {
+	s.mu.Lock()
+	s.downMap[model] = d
+	s.mu.Unlock()
+}
+
 func (s *authTrackingServer) setAuth(a string) {
 	s.mu.Lock()
 	s.lastAuth = a
@@ -59,6 +79,14 @@ func (s *authTrackingServer) snapshot() (auth string, probes, keyed int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastAuth, s.probes, s.keyed
+}
+
+func (s *authTrackingServer) keyAuthsCopy() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.keyAuths))
+	copy(out, s.keyAuths)
+	return out
 }
 
 func fallbackCfg(t *testing.T, upstream string) config.Config {
@@ -104,7 +132,7 @@ func TestFallbackToAPIKeyAfterConsecutiveFailures(t *testing.T) {
 	if keyed == 0 {
 		t.Fatal("expected at least one keyed attempt")
 	}
-	if !p.inKeyMode() {
+	if !p.inKeyMode("m") {
 		t.Fatal("expected proxy to stay in keyed mode after fallback")
 	}
 }
@@ -139,7 +167,7 @@ func TestNoKeySuccessResetsFailures(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("request 3 expected 429 (failures not accumulated), got %d", rec.Code)
 	}
-	if p.inKeyMode() {
+	if p.inKeyMode("m") {
 		t.Fatal("expected no fallback after a single new failure")
 	}
 	auth, _, keyed := ts.snapshot()
@@ -163,17 +191,17 @@ func TestProbeSwitchesBackToNoKey(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("fallback request expected 200, got %d", rec.Code)
 	}
-	if !p.inKeyMode() {
+	if !p.inKeyMode("m") {
 		t.Fatal("expected keyed mode after fallback")
 	}
 
-	// Anonymous recovers; the 3s probe should flip the proxy back.
+	// Anonymous recovers; the probe should flip the proxy back.
 	ts.setDown(false)
 	deadline := time.Now().Add(3 * time.Second)
-	for p.inKeyMode() && time.Now().Before(deadline) {
+	for p.inKeyMode("m") && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if p.inKeyMode() {
+	if p.inKeyMode("m") {
 		t.Fatal("proxy did not switch back to anonymous after recovery")
 	}
 
@@ -215,7 +243,7 @@ func TestFallbackTrafficGoesThroughSocks5(t *testing.T) {
 	if socks.handshakes.Load() == 0 {
 		t.Fatal("no SOCKS5 handshake: fallback traffic did not go through the socks5 proxy")
 	}
-	if !p.inKeyMode() {
+	if !p.inKeyMode("m") {
 		t.Fatal("expected keyed mode")
 	}
 }
@@ -236,10 +264,10 @@ func TestProbeKeepsKeyedModeWhileDown(t *testing.T) {
 		t.Fatalf("expected 200 via keyed retry, got %d", rec.Code)
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for p.inKeyMode() && time.Now().Before(deadline) {
+	for p.inKeyMode("m") && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !p.inKeyMode() {
+	if !p.inKeyMode("m") {
 		t.Fatal("expected probe to keep keyed mode while anonymous is down")
 	}
 }
@@ -269,11 +297,148 @@ func TestCircuitOpenStillTriggersFallback(t *testing.T) {
 		t.Fatalf("request 2 expected transparent 200 via API key despite open breaker, got %d body=%s",
 			rec.Code, rec.Body.String())
 	}
-	if !p.inKeyMode() {
+	if !p.inKeyMode("m") {
 		t.Fatal("expected keyed mode after circuit-open fallback")
 	}
 	auth, _, keyed := ts.snapshot()
 	if auth == "" || keyed == 0 {
 		t.Fatalf("expected a keyed attempt, auth=%q keyed=%d", auth, keyed)
+	}
+}
+
+// TestPerModelFallbackIsIndependent verifies a 429 storm on model A only
+// switches model A to API-key mode while model B keeps going anonymously.
+func TestPerModelFallbackIsIndependent(t *testing.T) {
+	ts := &authTrackingServer{downMap: map[string]bool{"model-a": true}}
+	srv := httptest.NewServer(http.HandlerFunc(ts.handler))
+	defer srv.Close()
+
+	cfg := fallbackCfg(t, srv.URL)
+	cfg.NoKeyFailThreshold = 1
+	cfg.NoKeyProbeInterval = time.Hour // keep the recovery probe out of the way
+	p := newTestProxy(t, cfg)
+
+	// model-a fails anonymously once and must transparently use a key.
+	rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"model-a","messages":[]}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("model-a fallback expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !p.inKeyMode("model-a") {
+		t.Fatal("model-a should be in keyed mode")
+	}
+	auth, _, keyed := ts.snapshot()
+	if auth == "" || !strings.HasPrefix(auth, "Bearer key-") || keyed == 0 {
+		t.Fatalf("expected a keyed request for model-a, auth=%q keyed=%d", auth, keyed)
+	}
+
+	// model-b is healthy: it stays anonymous and succeeds without a key even
+	// though model-a already fell back.
+	rec = doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"model-b","messages":[]}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("model-b expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if p.inKeyMode("model-b") {
+		t.Fatal("model-b should stay anonymous")
+	}
+	auth, _, _ = ts.snapshot()
+	if auth != "" {
+		t.Fatalf("expected anonymous request for model-b, auth=%q", auth)
+	}
+
+	// model-a keeps using a key on later requests; model-b keeps going
+	// without one.
+	rec = doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"model-a","messages":[]}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("model-a second call expected 200, got %d", rec.Code)
+	}
+	auth, _, _ = ts.snapshot()
+	if !strings.HasPrefix(auth, "Bearer key-") {
+		t.Fatalf("expected keyed request for model-a, auth=%q", auth)
+	}
+}
+
+// TestProbeRecoversSingleModel verifies recovery probing is per model: when
+// model-a's anonymous path recovers only model-a flips back to anonymous,
+// model-b remains in keyed mode.
+func TestProbeRecoversSingleModel(t *testing.T) {
+	ts := &authTrackingServer{downMap: map[string]bool{"model-a": true, "model-b": true}}
+	srv := httptest.NewServer(http.HandlerFunc(ts.handler))
+	defer srv.Close()
+
+	cfg := fallbackCfg(t, srv.URL)
+	cfg.NoKeyFailThreshold = 1
+	cfg.NoKeyProbeInterval = 30 * time.Millisecond
+	p := newTestProxy(t, cfg)
+
+	for _, model := range []string{"model-a", "model-b"} {
+		rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+			`{"model":"`+model+`","messages":[]}`, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s fallback expected 200, got %d body=%s", model, rec.Code, rec.Body.String())
+		}
+	}
+	if !p.inKeyMode("model-a") || !p.inKeyMode("model-b") {
+		t.Fatal("both models should be in keyed mode")
+	}
+
+	// model-a anonymous recovers; only model-a must flip back.
+	ts.setDownModel("model-a", false)
+	deadline := time.Now().Add(3 * time.Second)
+	for p.inKeyMode("model-a") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if p.inKeyMode("model-a") {
+		t.Fatal("model-a should have switched back to anonymous after recovery")
+	}
+	if !p.inKeyMode("model-b") {
+		t.Fatal("model-b should remain in keyed mode")
+	}
+}
+
+// TestKeyedRequestsPickRandomKey verifies every keyed request draws one key at
+// random from the whole pool: over enough requests both keys appear and each
+// is used a substantial share of the time.
+func TestKeyedRequestsPickRandomKey(t *testing.T) {
+	ts := &authTrackingServer{down: true}
+	srv := httptest.NewServer(http.HandlerFunc(ts.handler))
+	defer srv.Close()
+
+	cfg := fallbackCfg(t, srv.URL) // APIKeys = key-A, key-B
+	cfg.NoKeyFailThreshold = 1
+	cfg.NoKeyProbeInterval = time.Hour
+	p := newTestProxy(t, cfg)
+
+	const n = 200
+	for i := 0; i < n; i++ {
+		rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+			`{"model":"m","messages":[]}`, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d expected 200, got %d", i, rec.Code)
+		}
+	}
+	if !p.inKeyMode("m") {
+		t.Fatal("expected keyed mode after fallback")
+	}
+
+	auths := ts.keyAuthsCopy()
+	if len(auths) != n {
+		t.Fatalf("expected %d keyed requests, got %d", n, len(auths))
+	}
+	seen := map[string]bool{}
+	counts := map[string]int{}
+	for _, k := range auths {
+		seen[k] = true
+		counts[k]++
+	}
+	if !seen["key-A"] || !seen["key-B"] {
+		t.Fatalf("expected both pool keys to be picked over %d requests, seen=%v", n, seen)
+	}
+	for k, c := range counts {
+		if c < n/4 {
+			t.Fatalf("key %s used only %d/%d times; picks are not random enough", k, c, n)
+		}
 	}
 }

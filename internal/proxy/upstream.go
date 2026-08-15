@@ -13,12 +13,13 @@ import (
 )
 
 func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream bool) (*http.Response, error) {
+	model := modelFromBody(body)
 	for attempt := 0; ; attempt++ {
 		if !p.circuit.Allow() {
 			// An open breaker can strand anonymous mode (the requests never
 			// reach the give-up points below). Count it as a no-key failure
 			// so a persistent 429 storm still trips the API-key fallback.
-			if p.recordNoKeyFailure() {
+			if p.recordNoKeyFailure(model) {
 				p.circuit.Reset()
 				attempt = -1
 				continue
@@ -40,7 +41,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "zen-proxy/1.0")
-		if key, ok := p.requestKey(); ok {
+		if key, ok := p.requestKey(model); ok {
 			req.Header.Set("Authorization", "Bearer "+key)
 		}
 		if stream {
@@ -53,7 +54,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 			p.log.Debug("upstream attempt failed", "attempt", attempt, "error", err)
 			wait, ok := p.backoff(attempt, 0)
 			if !ok {
-				if p.recordNoKeyFailure() {
+				if p.recordNoKeyFailure(model) {
 					// Anonymous mode is down and the threshold was reached:
 					// retry this very request with an API key, transparently.
 					attempt = -1
@@ -75,7 +76,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 			wait, ok := p.backoff(attempt, ra)
 			p.log.Warn("upstream returned 429", "attempt", attempt, "retry_after_s", ra, "wait", wait)
 			if !ok {
-				if p.recordNoKeyFailure() {
+				if p.recordNoKeyFailure(model) {
 					p.circuit.Reset()
 					attempt = -1
 					continue
@@ -90,7 +91,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 
 		if resp.StatusCode >= 500 {
 			p.log.Warn("upstream returned server error", "status", resp.StatusCode)
-			if p.recordNoKeyFailure() {
+			if p.recordNoKeyFailure(model) {
 				resp.Body.Close()
 				cancel()
 				p.circuit.Reset()
@@ -100,7 +101,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 		}
 
 		p.circuit.RecordSuccess()
-		p.recordNoKeySuccess()
+		p.recordNoKeySuccess(model)
 		resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 		return resp, nil
 	}
@@ -172,6 +173,19 @@ func newRateLimitResponse(retryAfter int) *http.Response {
 		ContentLength: int64(len(b)),
 		Request:       nil,
 	}
+}
+
+// modelFromBody extracts the upstream model id from a request body so the
+// per-model fallback can key its state on exactly what the upstream sees
+// (already alias-resolved / rewritten where applicable).
+func modelFromBody(body []byte) string {
+	var m struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return ""
+	}
+	return m.Model
 }
 
 type cancelOnCloseBody struct {
