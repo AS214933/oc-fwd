@@ -1,4 +1,4 @@
-package main
+package circuit
 
 import (
 	"sync"
@@ -16,7 +16,7 @@ type Circuit struct {
 	cooldown  time.Duration
 }
 
-func newCircuit(failures int, cooldown time.Duration) *Circuit {
+func New(failures int, cooldown time.Duration) *Circuit {
 	return &Circuit{threshold: failures, cooldown: cooldown}
 }
 

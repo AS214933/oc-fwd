@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"context"
@@ -14,14 +14,16 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"zenproxy/internal/config"
 )
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func baseCfg() Config {
-	return Config{
+func baseCfg() config.Config {
+	return config.Config{
 		Listen:           ":0",
 		UpstreamBase:     "http://upstream.test/zen/v1",
 		RetryMax:         2,
@@ -33,11 +35,11 @@ func baseCfg() Config {
 	}
 }
 
-func newTestProxy(t *testing.T, cfg Config) *Proxy {
+func newTestProxy(t *testing.T, cfg config.Config) *Proxy {
 	t.Helper()
-	p, err := newProxy(cfg, testLogger())
+	p, err := New(cfg, testLogger())
 	if err != nil {
-		t.Fatalf("newProxy: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	return p
 }

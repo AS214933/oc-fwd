@@ -23,8 +23,23 @@ docker compose up -d --build
 ### 直接运行
 
 ```bash
-go build -o zen-proxy .
+go build -o zen-proxy ./cmd/zenproxy
 ZEN_MODELS=deepseek-v4-flash-free ./zen-proxy
+```
+
+## 项目结构
+
+```text
+cmd/zenproxy/            # 入口：加载配置、启动 HTTP 服务
+internal/config/         # 配置与环境变量解析
+internal/circuit/        # 429 熔断器
+internal/proxy/          # 代理核心
+  ├── proxy.go           #   Proxy 结构、构造、路由、鉴权、日志中间件
+  ├── handler.go         #   /v1/chat|responses|messages 请求处理
+  ├── dial.go            #   socks5 + IPv6 优先/强制拨号、/debug/upstream-ip
+  ├── convert.go         #   统一转 Chat Completions（responses/messages）
+  ├── upstream.go        #   上游请求、429 重试/退避
+  └── stream.go          #   SSE 流式转发与 model 改写
 ```
 
 ## 环境变量

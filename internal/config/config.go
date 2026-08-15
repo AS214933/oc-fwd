@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -84,7 +84,7 @@ func parseModelMap(s string) (map[string]string, error) {
 	return m, nil
 }
 
-func loadConfig() (Config, error) {
+func Load() (Config, error) {
 	cfg := Config{
 		Listen:               envStr("LISTEN_ADDR", ":8080"),
 		UpstreamBase:         strings.TrimRight(envStr("ZEN_UPSTREAM", "https://opencode.ai/zen/v1"), "/"),

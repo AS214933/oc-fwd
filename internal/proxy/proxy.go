@@ -1,0 +1,211 @@
+// Package proxy implements the opencode zen reverse proxy: OpenAI-compatible
+// HTTP surface, socks5 + IPv6-aware upstream dialing, 429 retry/circuit
+// breaker, and optional forced Chat Completions conversion.
+package proxy
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	mrand "math/rand"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"zenproxy/internal/circuit"
+	"zenproxy/internal/config"
+)
+
+var errCircuitOpen = errors.New("upstream rate limit circuit is open")
+
+type Proxy struct {
+	cfg     config.Config
+	log     *slog.Logger
+	client  *http.Client
+	circuit *circuit.Circuit
+	sem     chan struct{}
+	rnd     *mrand.Rand
+	rndMu   sync.Mutex
+}
+
+func New(cfg config.Config, log *slog.Logger) (*Proxy, error) {
+	tr := &http.Transport{
+		MaxIdleConns:          2000,
+		MaxIdleConnsPerHost:   512,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ForceAttemptHTTP2:     true,
+		// No total ResponseHeaderTimeout: prefill for very long prompts can
+		// take minutes and streaming responses stay open for a long time.
+	}
+	if cfg.RotateIP {
+		// Every request gets a fresh TCP connection through the socks5 proxy
+		// so per-connection random exit IPs (e.g. rotating IPv6) actually
+		// rotate. Connection pooling would pin all requests to one exit IP
+		// and make upstream IP-based rate limits kick in again.
+		tr.DisableKeepAlives = true
+		// HTTP/2 multiplexes requests over one connection, which defeats
+		// rotation; fall back to HTTP/1.1 when rotating.
+		tr.ForceAttemptHTTP2 = false
+		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	}
+	if cfg.Socks5 != "" {
+		dialer, err := newSocks5Dialer(cfg.Socks5)
+		if err != nil {
+			return nil, err
+		}
+		tr.DialContext = makeDialContext(cfg, log, func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.Dial(network, address)
+		})
+	} else {
+		nd := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		tr.DialContext = makeDialContext(cfg, log, nd.DialContext)
+	}
+	client := &http.Client{Transport: tr} // per-request timeout applied in doUpstream
+	var sem chan struct{}
+	if cfg.MaxConcurrency > 0 {
+		sem = make(chan struct{}, cfg.MaxConcurrency)
+	}
+	return &Proxy{
+		cfg:     cfg,
+		log:     log,
+		client:  client,
+		circuit: circuit.New(cfg.CircuitFailures, cfg.CircuitCooldown),
+		sem:     sem,
+		rnd:     mrand.New(mrand.NewSource(time.Now().UnixNano())),
+	}, nil
+}
+
+// Handler builds the full HTTP routing table.
+func (p *Proxy) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", p.requireAuth(p.handleCompletion("chat")))
+	mux.HandleFunc("POST /v1/responses", p.requireAuth(p.handleCompletion("responses")))
+	mux.HandleFunc("POST /v1/messages", p.requireAuth(p.handleCompletion("messages")))
+	mux.HandleFunc("GET /v1/models", p.requireAuth(p.handleModels))
+	mux.HandleFunc("GET /debug/upstream-ip", p.requireAuth(p.handleDebugUpstreamIP))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		io.WriteString(w, "ok")
+	})
+	return p.logMiddleware(mux)
+}
+
+// requireAuth enforces the optional caller API key (ZEN_AUTH_KEY).
+func (p *Proxy) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if p.cfg.AuthKey != "" && !validCallerKey(r, p.cfg.AuthKey) {
+			writeError(w, http.StatusUnauthorized, "Invalid API key", "invalid_api_key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func validCallerKey(r *http.Request, want string) bool {
+	got := ""
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		got = strings.TrimSpace(h[len("Bearer "):])
+	} else if h := r.Header.Get("x-api-key"); h != "" {
+		got = strings.TrimSpace(h)
+	}
+	if got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
+	seen := map[string]bool{}
+	ids := []string{}
+	created := time.Now().Unix()
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for _, m := range p.cfg.Models {
+		add(m)
+	}
+	for alias := range p.cfg.ModelMap {
+		add(alias)
+	}
+	payload := map[string]any{
+		"object": "list",
+		"data":   []any{},
+	}
+	if len(ids) > 0 {
+		items := make([]map[string]any, 0, len(ids))
+		for _, id := range ids {
+			items = append(items, map[string]any{
+				"id":       id,
+				"object":   "model",
+				"created":  created,
+				"owned_by": "zen-proxy",
+			})
+		}
+		payload["data"] = items
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payload)
+}
+
+func writeError(w http.ResponseWriter, status int, msg, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    "invalid_request_error",
+			"param":   nil,
+			"code":    code,
+		},
+	})
+}
+
+// logMiddleware adds request logging and a request id.
+func (p *Proxy) logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		reqID := r.Header.Get("X-Request-Id")
+		if reqID == "" {
+			reqID = newRequestID()
+		}
+		w.Header().Set("X-Request-Id", reqID)
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		p.log.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"req_id", reqID,
+		)
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func newRequestID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}

@@ -8,7 +8,7 @@ COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/zen-proxy .
+    go build -trimpath -ldflags="-s -w" -o /out/zen-proxy ./cmd/zenproxy
 
 # ---- runtime stage ----
 FROM alpine:3.21
