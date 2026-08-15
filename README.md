@@ -36,7 +36,7 @@ ZEN_MODELS=deepseek-v4-flash-free ./zen-proxy
 | `ZEN_UPSTREAM_API_KEY` | 空 | 调用上游的 key；留空 = 匿名调用 zen free |
 | `ZEN_SOCKS5` | 空 | socks5 代理，如 `socks5://user:pass@host:port` |
 | `ZEN_IPV6_PREFER` | `true` | 域名本地解析、IPv6 优先，失败回退 IPv4；`false` = 主机名透传给代理解析 |
-| `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | `true` = chat/completions 跳过模型白名单/别名，原样强转上游 |
+| `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | `true` = 全部请求统一转成 Chat Completions 转发（详见下文） |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
 | `ZEN_AUTH_KEY` | 空 | 调用本反代所需的 key；留空 = 免鉴权 |
@@ -79,6 +79,17 @@ curl http://localhost:8080/debug/upstream-ip
 - 上游返回 `429` 时：优先按 `Retry-After` 等待，否则指数退避 + 随机抖动，最多重试 `ZEN_RETRY_MAX` 次；
 - 连续 `ZEN_CIRCUIT_FAILURES` 次 429 后熔断打开：冷却期内直接返回 `429`（不再打上游），冷却结束自动半开重试；
 - 重试耗尽后返回 `429`，错误体为 OpenAI 格式。
+
+## 强制统一为 Chat Completions 转发
+
+设置 `ZEN_FORCE_CHAT_COMPLETIONS=true` 后，所有进来的请求都会以 **Chat Completions 格式**转发到上游 `/v1/chat/completions`，返回体统一为 `chat.completion`：
+
+- `POST /v1/chat/completions`：原样透传（不检查模型白名单/不做别名改写）；
+- `POST /v1/responses`：自动转换为 Chat Completions（`instructions` → system 消息，`input` → user/assistant 消息，`max_output_tokens` → `max_tokens`，function tools 转换后透传）；
+- `POST /v1/messages`（Anthropic）：`system`/`messages`/`tools`/`max_tokens` 转换为 Chat Completions 等价字段；
+- 图片等非文本 content 会在转换时忽略（当前为纯文本转换）。
+
+`false`（默认）时各端点按原生格式转发：`/v1/responses → /responses`、`/v1/messages → /messages`，此时模型白名单/别名检查对三个端点都生效。
 
 ## 怎么判断是不是 IPv6
 

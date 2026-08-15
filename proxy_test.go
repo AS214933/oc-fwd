@@ -404,3 +404,108 @@ func TestDebugUpstreamIP(t *testing.T) {
 		t.Fatalf("unexpected probe result: %+v", out)
 	}
 }
+
+func TestForceResponsesToChatCompletions(t *testing.T) {
+	var gotPath string
+	var got struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+		Stream bool `json:"stream"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"model":"resp-model","choices":[{"message":{"role":"assistant","content":"x"}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.ForceChatCompletions = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/responses",
+		`{"model":"resp-model","instructions":"be nice","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":false}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/chat/completions" {
+		t.Fatalf("expected /chat/completions, got %s", gotPath)
+	}
+	if got.Model != "resp-model" || len(got.Messages) != 2 {
+		t.Fatalf("bad conversion: %+v", got)
+	}
+	if got.Messages[0].Role != "system" || got.Messages[0].Content != "be nice" {
+		t.Fatalf("system message wrong: %+v", got.Messages[0])
+	}
+	if got.Messages[1].Role != "user" || got.Messages[1].Content != "hello" {
+		t.Fatalf("user message wrong: %+v", got.Messages[1])
+	}
+}
+
+func TestForceMessagesToChatCompletions(t *testing.T) {
+	var got struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		Stream    bool   `json:"stream"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("expected /chat/completions, got %s", r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"model":"an-model","choices":[]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.ForceChatCompletions = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/messages",
+		`{"model":"an-model","max_tokens":64,"system":[{"type":"text","text":"sys"}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"stream":true}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got.Model != "an-model" || got.MaxTokens != 64 || !got.Stream {
+		t.Fatalf("bad conversion header: %+v", got)
+	}
+	if len(got.Messages) != 2 || got.Messages[0].Content != "sys" || got.Messages[1].Content != "hi" {
+		t.Fatalf("bad messages: %+v", got.Messages)
+	}
+}
+
+func TestMessagesPassthroughWithoutForce(t *testing.T) {
+	var gotPath string
+	var gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		gotModel, _ = body["model"].(string)
+		fmt.Fprint(w, `{"type":"message","content":[]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.Models = []string{"an-model"}
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/messages",
+		`{"model":"an-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/messages" {
+		t.Fatalf("expected /messages passthrough, got %s", gotPath)
+	}
+	if gotModel != "an-model" {
+		t.Fatalf("model = %q", gotModel)
+	}
+}

@@ -155,8 +155,9 @@ func newSocks5Dialer(s string) (proxy.Dialer, error) {
 // Handler builds the full HTTP routing table.
 func (p *Proxy) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", p.requireAuth(p.handleCompletion("/chat/completions")))
-	mux.HandleFunc("POST /v1/responses", p.requireAuth(p.handleCompletion("/responses")))
+	mux.HandleFunc("POST /v1/chat/completions", p.requireAuth(p.handleCompletion("chat")))
+	mux.HandleFunc("POST /v1/responses", p.requireAuth(p.handleCompletion("responses")))
+	mux.HandleFunc("POST /v1/messages", p.requireAuth(p.handleCompletion("messages")))
 	mux.HandleFunc("GET /v1/models", p.requireAuth(p.handleModels))
 	mux.HandleFunc("GET /debug/upstream-ip", p.requireAuth(p.handleDebugUpstreamIP))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +196,7 @@ type completionMeta struct {
 	Stream bool   `json:"stream"`
 }
 
-func (p *Proxy) handleCompletion(upstreamPath string) http.HandlerFunc {
+func (p *Proxy) handleCompletion(format string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, p.cfg.MaxBodyBytes))
 		if err != nil {
@@ -207,20 +208,33 @@ func (p *Proxy) handleCompletion(upstreamPath string) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error")
 			return
 		}
-		// ZEN_FORCE_CHAT_COMPLETIONS bypasses the model allowlist/alias
-		// rewriting and forwards chat completions verbatim to the upstream.
-		force := p.cfg.ForceChatCompletions && upstreamPath == "/chat/completions"
-		upstreamModel := meta.Model
+
+		upstreamPath := map[string]string{
+			"chat":      "/chat/completions",
+			"responses": "/responses",
+			"messages":  "/messages",
+		}[format]
+
+		force := p.cfg.ForceChatCompletions
 		rewrite := false
-		if !force {
-			var ok bool
-			upstreamModel, ok = p.resolveModel(meta.Model)
+		if force {
+			// Normalize everything to Chat Completions before forwarding.
+			if format != "chat" {
+				body, err = convertToChatCompletions(format, body)
+				if err != nil {
+					writeError(w, http.StatusBadRequest, "cannot convert request to chat completions: "+err.Error(), "invalid_request_error")
+					return
+				}
+				upstreamPath = "/chat/completions"
+			}
+			// chat/completions with force=true is a raw passthrough.
+		} else {
+			upstreamModel, ok := p.resolveModel(meta.Model)
 			if !ok {
 				writeError(w, http.StatusBadRequest,
 					fmt.Sprintf("model %q is not allowed by this proxy", meta.Model), "model_not_found")
 				return
 			}
-			// Rewrite the model field in the upstream request when aliased.
 			rewrite = upstreamModel != meta.Model
 			if rewrite {
 				body = rewriteBodyModel(body, upstreamModel)
@@ -255,7 +269,6 @@ func (p *Proxy) handleCompletion(upstreamPath string) http.HandlerFunc {
 		w.Header().Set("X-Zen-Proxy", "1")
 
 		if resp.StatusCode != http.StatusOK {
-			// Forward non-200 responses (including the final 429) untouched.
 			w.WriteHeader(resp.StatusCode)
 			io.Copy(w, resp.Body)
 			return
@@ -302,6 +315,227 @@ func (p *Proxy) resolveModel(clientModel string) (string, bool) {
 		return "", false
 	}
 	return clientModel, true // allow any model when no restriction configured
+}
+
+type chatBody struct {
+	Model       string     `json:"model"`
+	Messages    []chatMsg  `json:"messages"`
+	MaxTokens   *int       `json:"max_tokens,omitempty"`
+	Temperature *float64   `json:"temperature,omitempty"`
+	Stream      bool       `json:"stream"`
+	Tools       []chatTool `json:"tools,omitempty"`
+}
+
+type chatMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatTool struct {
+	Type     string       `json:"type"`
+	Function chatToolFunc `json:"function"`
+}
+
+type chatToolFunc struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// convertToChatCompletions normalizes an incoming /v1/responses or /v1/messages
+// body into OpenAI Chat Completions format.
+func convertToChatCompletions(format string, body []byte) ([]byte, error) {
+	switch format {
+	case "responses":
+		return convertResponsesToChat(body)
+	case "messages":
+		return convertMessagesToChat(body)
+	}
+	return body, nil
+}
+
+func convertResponsesToChat(body []byte) ([]byte, error) {
+	var in struct {
+		Model           string            `json:"model"`
+		Instructions    string            `json:"instructions"`
+		Input           json.RawMessage   `json:"input"`
+		MaxOutputTokens *int              `json:"max_output_tokens"`
+		Temperature     *float64          `json:"temperature"`
+		Stream          bool              `json:"stream"`
+		Tools           []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		return nil, err
+	}
+	out := chatBody{Model: in.Model, Stream: in.Stream, Temperature: in.Temperature}
+	if in.MaxOutputTokens != nil {
+		out.MaxTokens = in.MaxOutputTokens
+	}
+	if in.Instructions != "" {
+		out.Messages = append(out.Messages, chatMsg{Role: "system", Content: in.Instructions})
+	}
+	input := bytes.TrimSpace(in.Input)
+	if len(input) == 0 {
+		return nil, fmt.Errorf("responses input is empty")
+	}
+	if input[0] == '"' {
+		var text string
+		if err := json.Unmarshal(input, &text); err != nil {
+			return nil, err
+		}
+		out.Messages = append(out.Messages, chatMsg{Role: "user", Content: text})
+	} else {
+		var items []json.RawMessage
+		if err := json.Unmarshal(input, &items); err != nil {
+			return nil, fmt.Errorf("unsupported responses input: %w", err)
+		}
+		for _, raw := range items {
+			var it struct {
+				Type    string          `json:"type"`
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+				Text    string          `json:"text"`
+			}
+			if err := json.Unmarshal(raw, &it); err != nil {
+				return nil, err
+			}
+			if it.Type == "function_call" || it.Type == "function_call_output" {
+				continue
+			}
+			if it.Text != "" {
+				out.Messages = append(out.Messages, chatMsg{Role: "user", Content: it.Text})
+				continue
+			}
+			role := it.Role
+			if role == "" {
+				role = "user"
+			}
+			content := responsesContentToString(it.Content)
+			if it.Type == "message" || it.Content != nil || content != "" {
+				out.Messages = append(out.Messages, chatMsg{Role: role, Content: content})
+			}
+		}
+	}
+	if len(out.Messages) == 0 {
+		return nil, fmt.Errorf("responses input produced no messages")
+	}
+	for _, tool := range in.Tools {
+		var t struct {
+			Type        string          `json:"type"`
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		}
+		if err := json.Unmarshal(tool, &t); err != nil {
+			continue
+		}
+		if t.Type != "function" && t.Name == "" {
+			continue
+		}
+		out.Tools = append(out.Tools, chatTool{
+			Type:     "function",
+			Function: chatToolFunc{Name: t.Name, Description: t.Description, Parameters: t.Parameters},
+		})
+	}
+	return json.Marshal(out)
+}
+
+func responsesContentToString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		_ = json.Unmarshal(raw, &s)
+		return s
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.Text != "" {
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
+}
+
+func convertMessagesToChat(body []byte) ([]byte, error) {
+	var in struct {
+		Model    string          `json:"model"`
+		System   json.RawMessage `json:"system"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+		MaxTokens   int      `json:"max_tokens"`
+		Temperature *float64 `json:"temperature"`
+		Stream      bool     `json:"stream"`
+		Tools       []struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		return nil, err
+	}
+	out := chatBody{Model: in.Model, Stream: in.Stream, Temperature: in.Temperature}
+	if in.MaxTokens > 0 {
+		out.MaxTokens = &in.MaxTokens
+	}
+	if sys := anthropicContentToString(in.System); sys != "" {
+		out.Messages = append(out.Messages, chatMsg{Role: "system", Content: sys})
+	}
+	for _, m := range in.Messages {
+		role := m.Role
+		if role == "" {
+			role = "user"
+		}
+		out.Messages = append(out.Messages, chatMsg{Role: role, Content: anthropicContentToString(m.Content)})
+	}
+	if len(out.Messages) == 0 {
+		return nil, fmt.Errorf("messages body produced no messages")
+	}
+	for _, t := range in.Tools {
+		out.Tools = append(out.Tools, chatTool{
+			Type:     "function",
+			Function: chatToolFunc{Name: t.Name, Description: t.Description, Parameters: t.InputSchema},
+		})
+	}
+	return json.Marshal(out)
+}
+
+func anthropicContentToString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		_ = json.Unmarshal(raw, &s)
+		return s
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.Type == "text" && p.Text != "" {
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
 }
 
 func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
