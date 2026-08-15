@@ -28,6 +28,7 @@ type Config struct {
 	UpstreamTimeoutSet   bool
 	MaxConcurrency       int
 	IPv6Prefer           bool
+	ForceIPv6            bool
 	ForceChatCompletions bool
 	LogLevel             string
 }
@@ -98,6 +99,7 @@ func loadConfig() (Config, error) {
 		UpstreamTimeout:      envSeconds("ZEN_UPSTREAM_TIMEOUT_SECONDS", 600),
 		MaxConcurrency:       envInt("ZEN_MAX_CONCURRENCY", 0),
 		IPv6Prefer:           envBool("ZEN_IPV6_PREFER", true),
+		ForceIPv6:            envBool("ZEN_FORCE_IPV6", false),
 		ForceChatCompletions: envBool("ZEN_FORCE_CHAT_COMPLETIONS", false),
 		LogLevel:             envStr("LOG_LEVEL", "info"),
 	}

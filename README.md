@@ -36,6 +36,7 @@ ZEN_MODELS=deepseek-v4-flash-free ./zen-proxy
 | `ZEN_UPSTREAM_API_KEY` | 空 | 调用上游的 key；留空 = 匿名调用 zen free |
 | `ZEN_SOCKS5` | 空 | socks5 代理，如 `socks5://user:pass@host:port` |
 | `ZEN_IPV6_PREFER` | `true` | 域名本地解析、IPv6 优先，失败回退 IPv4；`false` = 主机名透传给代理解析 |
+| `ZEN_FORCE_IPV6` | `false` | `true` = 强制只走 IPv6，绝不回退 IPv4；目标无 AAAA / 拨号失败直接报错（详见下文） |
 | `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | `true` = 全部请求统一转成 Chat Completions 转发（详见下文） |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
@@ -100,6 +101,11 @@ curl http://localhost:8080/debug/upstream-ip
 ## IPv6 优先说明
 
 `ZEN_IPV6_PREFER=true`（默认）时：上游域名由本代理本地 DNS 解析，优先使用 AAAA（IPv6）地址连接，IPv6 失败自动回退 IPv4——配合支持 IPv6 出口的 socks5 代理使用。设为 `false` 则恢复纯 socks5h 行为（主机名直接交给代理解析，不本地解析）。
+
+`ZEN_FORCE_IPV6=true` 时进一步收紧：只要有 AAAA 记录就只尝试 IPv6，IPv6 拨号失败**不会**回退 IPv4（目标只有 IPv4 或 DNS 失败时直接报错）。适合确认上游确实经由 socks5 的 IPv6 出口出网、排查“以为走了 IPv6 其实回退了 IPv4”的情况。`/debug/upstream-ip` 会同时返回 `ipv6_prefer` 与 `ipv6_force` 两个字段。
+
+判断每次连接是否真的走了 socks5 + IPv6：开启 `LOG_LEVEL=debug` 后每次上游拨号都会打印
+`dialed upstream ... ip=[2606:...]:443 family=ipv6`，带方括号+冒号的即 IPv6；也可用 `/debug/upstream-ip` 直接看 `family` 字段。
 
 ## 构建与测试
 

@@ -388,20 +388,50 @@ func TestDebugUpstreamIP(t *testing.T) {
 
 	cfg := baseCfg()
 	cfg.UpstreamBase = srv.URL
+	cfg.IPv6Prefer = true
 	p := newTestProxy(t, cfg)
 	rec := doJSON(t, p.Handler(), "GET", "/debug/upstream-ip", "", nil)
 	if rec.Code != 200 {
 		t.Fatalf("debug ip status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		IP     string `json:"ip"`
-		Family string `json:"family"`
+		IP       string `json:"ip"`
+		Family   string `json:"family"`
+		ForceV6  bool   `json:"ipv6_force"`
+		PreferV6 bool   `json:"ipv6_prefer"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.Family != "ipv4" || out.IP != "127.0.0.1" {
 		t.Fatalf("unexpected probe result: %+v", out)
+	}
+	if out.ForceV6 || !out.PreferV6 {
+		t.Fatalf("unexpected ipv6 flags: %+v", out)
+	}
+}
+
+func TestDebugUpstreamIPForced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = srv.URL
+	cfg.ForceIPv6 = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "GET", "/debug/upstream-ip", "", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 when ipv6 forced against ipv4-only target, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Error   string `json:"error"`
+		ForceV6 bool   `json:"ipv6_force"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.ForceV6 || out.Error == "" {
+		t.Fatalf("expected ipv6_force=true with error, got %+v", out)
 	}
 }
 
@@ -534,5 +564,139 @@ func TestForceResponsesMixedStringInput(t *testing.T) {
 	}
 	if len(got.Messages) != 2 || got.Messages[0].Content != "hello" || got.Messages[1].Content != "world" {
 		t.Fatalf("bad conversion: %+v", got.Messages)
+	}
+}
+
+func TestForceIPv6NoFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	host, port, _ := net.SplitHostPort(u.Host) // 127.0.0.1:port
+
+	cfg := baseCfg()
+	cfg.IPv6Prefer = true
+	cfg.ForceIPv6 = true
+	nd := &net.Dialer{Timeout: 2 * time.Second}
+	dial := makeDialContext(cfg, testLogger(), nd.DialContext)
+
+	_, err := dial(context.Background(), "tcp", net.JoinHostPort(host, port))
+	if err == nil {
+		t.Fatal("expected dial failure when IPv6 is forced and only IPv4 is reachable")
+	}
+	if !strings.Contains(err.Error(), "ipv6") {
+		t.Fatalf("expected ipv6 error, got: %v", err)
+	}
+}
+
+// minimalSocks5Server is a tiny no-auth SOCKS5 proxy used to prove that the
+// upstream traffic actually flows through the configured SOCKS5 dialer.
+type minimalSocks5Server struct {
+	ln         net.Listener
+	handshakes atomic.Int64
+}
+
+func newMinimalSocks5Server(t *testing.T) *minimalSocks5Server {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &minimalSocks5Server{ln: ln}
+	go s.serve()
+	t.Cleanup(func() { ln.Close() })
+	return s
+}
+
+func (s *minimalSocks5Server) addr() string { return s.ln.Addr().String() }
+
+func (s *minimalSocks5Server) serve() {
+	for {
+		c, err := s.ln.Accept()
+		if err != nil {
+			return
+		}
+		go s.handle(c)
+	}
+}
+
+func (s *minimalSocks5Server) handle(c net.Conn) {
+	defer c.Close()
+	greet := make([]byte, 2)
+	if _, err := io.ReadFull(c, greet); err != nil || greet[0] != 0x05 {
+		return
+	}
+	methods := make([]byte, int(greet[1]))
+	if _, err := io.ReadFull(c, methods); err != nil {
+		return
+	}
+	c.Write([]byte{0x05, 0x00}) // no-auth
+
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(c, head); err != nil || head[0] != 0x05 || head[1] != 0x01 {
+		return
+	}
+	var host string
+	switch head[3] {
+	case 0x01:
+		b := make([]byte, 4)
+		if _, err := io.ReadFull(c, b); err != nil {
+			return
+		}
+		host = net.IP(b).String()
+	case 0x03:
+		l := make([]byte, 1)
+		if _, err := io.ReadFull(c, l); err != nil {
+			return
+		}
+		b := make([]byte, int(l[0]))
+		if _, err := io.ReadFull(c, b); err != nil {
+			return
+		}
+		host = string(b)
+	case 0x04:
+		b := make([]byte, 16)
+		if _, err := io.ReadFull(c, b); err != nil {
+			return
+		}
+		host = net.IP(b).String()
+	default:
+		return
+	}
+	port := make([]byte, 2)
+	if _, err := io.ReadFull(c, port); err != nil {
+		return
+	}
+	s.handshakes.Add(1)
+
+	target, err := net.Dial("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", uint16(port[0])<<8|uint16(port[1]))))
+	if err != nil {
+		return
+	}
+	defer target.Close()
+	c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // success, bind 0.0.0.0:0
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(target, c); done <- struct{}{} }()
+	go func() { io.Copy(c, target); done <- struct{}{} }()
+	<-done
+}
+
+func TestSocks5TrafficGoesThroughProxy(t *testing.T) {
+	socks := newMinimalSocks5Server(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.Socks5 = "socks5://" + socks.addr()
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"m","messages":[]}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if socks.handshakes.Load() == 0 {
+		t.Fatal("no SOCKS5 handshake recorded: traffic did not go through the socks5 proxy")
 	}
 }
