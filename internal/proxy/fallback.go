@@ -122,6 +122,30 @@ func (p *Proxy) recordNoKeyFailure(model string) (switched bool) {
 	return false
 }
 
+// forceSwitchToKey immediately marks the model as keyed so the current
+// request is transparently retried with an API key instead of leaking a 5xx
+// (e.g. 503) to the client. Returns false when no key pool is configured or
+// the model is already keyed (a keyed retry that still errors is surfaced).
+func (p *Proxy) forceSwitchToKey(model string) bool {
+	if !p.keysEnabled() {
+		return false
+	}
+	p.fb.mu.Lock()
+	defer p.fb.mu.Unlock()
+	st := p.fb.models[model]
+	if st == nil {
+		st = &modelFallback{}
+		p.fb.models[model] = st
+	}
+	if st.keyMode {
+		return false
+	}
+	p.log.Info("upstream server error, switching model to API-key mode", "model", model)
+	st.keyMode = true
+	st.noKeyFails = 0
+	return true
+}
+
 // recordNoKeySuccess resets the anonymous failure counter for the model.
 func (p *Proxy) recordNoKeySuccess(model string) {
 	if !p.keysEnabled() {
