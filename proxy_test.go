@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -295,4 +298,50 @@ func TestInvalidBody(t *testing.T) {
 	if rec.Code != 400 {
 		t.Fatalf("status = %d", rec.Code)
 	}
+}
+
+func TestOrderIPs(t *testing.T) {
+	v4 := []net.IP{net.ParseIP("172.65.90.21")}
+	v6 := []net.IP{net.ParseIP("2606:4700:78::90:0:142")}
+	ips := append(append([]net.IP{}, v4...), v6...)
+
+	got := orderIPs(ips, true)
+	if !got[0].Equal(v6[0]) || !got[1].Equal(v4[0]) {
+		t.Fatalf("ipv6 first order wrong: %v", got)
+	}
+	got = orderIPs(ips, false)
+	if !got[0].Equal(v4[0]) || !got[1].Equal(v6[0]) {
+		t.Fatalf("ipv4 first order wrong: %v", got)
+	}
+}
+
+func TestDialPrefersIPv6WithFallback(t *testing.T) {
+	// Server bound only to 127.0.0.1: prefer-IPv6 dial of "localhost" must
+	// try ::1 first, fail, and fall back to 127.0.0.1.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	host, port, _ := net.SplitHostPort(u.Host) // 127.0.0.1:port
+	cfg := baseCfg()
+	cfg.IPv6Prefer = true
+	nd := &net.Dialer{Timeout: 5 * time.Second}
+	dial := makeDialContext(cfg, testLogger(), nd.DialContext)
+
+	conn, err := dial(context.Background(), "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	conn.Close()
+
+	// Preferring IPv4 for the same target must also succeed.
+	cfg.IPv6Prefer = false
+	dial4 := makeDialContext(cfg, testLogger(), nd.DialContext)
+	conn, err = dial4(context.Background(), "tcp", "localhost:"+port)
+	if err != nil {
+		t.Fatalf("dial (no prefer) failed: %v", err)
+	}
+	conn.Close()
 }

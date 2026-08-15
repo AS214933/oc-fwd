@@ -27,6 +27,7 @@ type Config struct {
 	UpstreamTimeout    time.Duration
 	UpstreamTimeoutSet bool
 	MaxConcurrency     int
+	IPv6Prefer         bool
 	LogLevel           string
 }
 
@@ -48,6 +49,20 @@ func envInt(key string, def int) int {
 
 func envSeconds(key string, def int) time.Duration {
 	return time.Duration(envInt(key, def)) * time.Second
+}
+
+func envBool(key string, def bool) bool {
+	v := strings.ToLower(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return def
 }
 
 func parseModelMap(s string) (map[string]string, error) {
@@ -81,6 +96,7 @@ func loadConfig() (Config, error) {
 		MaxBodyBytes:     int64(envInt("ZEN_MAX_BODY_MB", 128)) << 20,
 		UpstreamTimeout:  envSeconds("ZEN_UPSTREAM_TIMEOUT_SECONDS", 600),
 		MaxConcurrency:   envInt("ZEN_MAX_CONCURRENCY", 0),
+		IPv6Prefer:       envBool("ZEN_IPV6_PREFER", true),
 		LogLevel:         envStr("LOG_LEVEL", "info"),
 	}
 	if cfg.UpstreamTimeout > 0 {

@@ -35,6 +35,7 @@ ZEN_MODELS=deepseek-v4-flash-free ./zen-proxy
 | `ZEN_UPSTREAM` | `https://opencode.ai/zen/v1` | 上游网关（OpenAI 兼容） |
 | `ZEN_UPSTREAM_API_KEY` | 空 | 调用上游的 key；留空 = 匿名调用 zen free |
 | `ZEN_SOCKS5` | 空 | socks5 代理，如 `socks5://user:pass@host:port` |
+| `ZEN_IPV6_PREFER` | `true` | 域名本地解析、IPv6 优先，失败回退 IPv4；`false` = 主机名透传给代理解析 |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
 | `ZEN_AUTH_KEY` | 空 | 调用本反代所需的 key；留空 = 免鉴权 |
@@ -73,6 +74,10 @@ curl http://localhost:8080/v1/models
 - 上游返回 `429` 时：优先按 `Retry-After` 等待，否则指数退避 + 随机抖动，最多重试 `ZEN_RETRY_MAX` 次；
 - 连续 `ZEN_CIRCUIT_FAILURES` 次 429 后熔断打开：冷却期内直接返回 `429`（不再打上游），冷却结束自动半开重试；
 - 重试耗尽后返回 `429`，错误体为 OpenAI 格式。
+
+## IPv6 优先说明
+
+`ZEN_IPV6_PREFER=true`（默认）时：上游域名由本代理本地 DNS 解析，优先使用 AAAA（IPv6）地址连接，IPv6 失败自动回退 IPv4——配合支持 IPv6 出口的 socks5 代理使用。设为 `false` 则恢复纯 socks5h 行为（主机名直接交给代理解析，不本地解析）。
 
 ## 构建与测试
 

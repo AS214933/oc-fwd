@@ -53,9 +53,12 @@ func newProxy(cfg Config, log *slog.Logger) (*Proxy, error) {
 		if err != nil {
 			return nil, err
 		}
-		tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		tr.DialContext = makeDialContext(cfg, log, func(ctx context.Context, network, address string) (net.Conn, error) {
 			return dialer.Dial(network, address)
-		}
+		})
+	} else {
+		nd := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		tr.DialContext = makeDialContext(cfg, log, nd.DialContext)
 	}
 	client := &http.Client{Transport: tr} // per-request timeout applied in doUpstream
 	var sem chan struct{}
@@ -70,6 +73,63 @@ func newProxy(cfg Config, log *slog.Logger) (*Proxy, error) {
 		sem:     sem,
 		rnd:     mrand.New(mrand.NewSource(time.Now().UnixNano())),
 	}, nil
+}
+
+// makeDialContext wraps a base dialer with optional IPv6-first preference:
+// the hostname is resolved locally, IPv6 addresses are tried before IPv4,
+// falling back to the other family on failure. When disabled the base dialer
+// is used as-is (hostname passthrough for socks5h).
+func makeDialContext(cfg Config, log *slog.Logger, base func(ctx context.Context, network, address string) (net.Conn, error)) func(ctx context.Context, network, address string) (net.Conn, error) {
+	if !cfg.IPv6Prefer {
+		return base
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return base(ctx, network, address)
+		}
+		if net.ParseIP(host) != nil {
+			return base(ctx, network, address)
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil || len(ips) == 0 {
+			log.Debug("dns lookup failed, using hostname as-is", "host", host, "error", err)
+			return base(ctx, network, address)
+		}
+		var lastErr error
+		for _, ip := range orderIPs(ips, true) {
+			addr := net.JoinHostPort(ip.String(), port)
+			conn, err := base(ctx, network, addr)
+			if err == nil {
+				log.Debug("dialed upstream", "host", host, "ip", ip.String(), "via", addr)
+				return conn, nil
+			}
+			lastErr = err
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no usable address for %s", host)
+		}
+		return nil, lastErr
+	}
+}
+
+// orderIPs sorts addresses so the preferred family comes first.
+func orderIPs(ips []net.IP, prefer6 bool) []net.IP {
+	var v6, v4 []net.IP
+	for _, ip := range ips {
+		if ip.To4() == nil {
+			v6 = append(v6, ip)
+		} else {
+			v4 = append(v4, ip)
+		}
+	}
+	if prefer6 {
+		return append(v6, v4...)
+	}
+	return append(v4, v6...)
 }
 
 func newSocks5Dialer(s string) (proxy.Dialer, error) {
