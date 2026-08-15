@@ -271,7 +271,7 @@ func TestStreamingRewrite(t *testing.T) {
 }
 
 func TestSocks5Parsing(t *testing.T) {
-	d, err := newSocks5Dialer("socks5://user:pass@100.64.0.16:1080")
+	d, err := newSocks5Dialer("socks5://user:pass@127.0.0.1:1080")
 	if err != nil || d == nil {
 		t.Fatalf("socks5 dialer: %v", err)
 	}
