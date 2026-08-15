@@ -37,6 +37,7 @@ ZEN_MODELS=deepseek-v4-flash-free ./zen-proxy
 | `ZEN_SOCKS5` | 空 | socks5 代理，如 `socks5://user:pass@host:port` |
 | `ZEN_IPV6_PREFER` | `true` | 域名本地解析、IPv6 优先，失败回退 IPv4；`false` = 主机名透传给代理解析 |
 | `ZEN_FORCE_IPV6` | `false` | `true` = 强制只走 IPv6，绝不回退 IPv4；目标无 AAAA / 拨号失败直接报错（详见下文） |
+| `ZEN_ROTATE_IP` | `true` | 每请求新建连接、禁用连接池：让 socks5 按连接随机分配的出口 IP（如随机 IPv6）真正生效，规避按 IP 的 429；`false` = 连接复用（更快但固定出口 IP） |
 | `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | `true` = 全部请求统一转成 Chat Completions 转发（详见下文） |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
@@ -106,6 +107,20 @@ curl http://localhost:8080/debug/upstream-ip
 
 判断每次连接是否真的走了 socks5 + IPv6：开启 `LOG_LEVEL=debug` 后每次上游拨号都会打印
 `dialed upstream ... ip=[2606:...]:443 family=ipv6`，带方括号+冒号的即 IPv6；也可用 `/debug/upstream-ip` 直接看 `family` 字段。
+
+## 为什么开了 socks5 还是 429（重要）
+
+很多 socks5 代理（包括本仓库测试用的 `100.64.0.16`）会**按 TCP 连接**随机分配出口 IP：每次新建连接的出口 IPv6 都不同。
+如果反代开着 HTTP 连接池（keep-alive），大量请求会**复用同一条连接**，也就是固定在一个出口 IP 上，很快打满该 IP 的按日配额 → 429。
+
+`ZEN_ROTATE_IP=true`（默认）会禁用连接复用，每个请求都新建一条 socks5 TCP 连接：
+出口 IP 随之轮换，429 大幅减少。实测（经 `100.64.0.16` 代理、匿名 zen free）：
+
+- `ZEN_ROTATE_IP=true`：4 个请求，4 次独立 IPv6 拨号，全部 `200`，无 429；
+- `ZEN_ROTATE_IP=false`：3 个请求只有 1 次拨号（全部复用同一出口 IP），这正是持续 429 的根源。
+
+代价是每次请求都要重新 TCP+TLS 握手，单请求延迟略增；若要极致吞吐可设 `false`，但会回到固定出口 IP。
+如果你已经设了 `true` 还 429，那就是该代理出口 IP 池整体被限流（或真的是上游配额），需要换代理出口。
 
 ## 构建与测试
 

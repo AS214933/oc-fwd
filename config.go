@@ -29,6 +29,7 @@ type Config struct {
 	MaxConcurrency       int
 	IPv6Prefer           bool
 	ForceIPv6            bool
+	RotateIP             bool
 	ForceChatCompletions bool
 	LogLevel             string
 }
@@ -100,6 +101,7 @@ func loadConfig() (Config, error) {
 		MaxConcurrency:       envInt("ZEN_MAX_CONCURRENCY", 0),
 		IPv6Prefer:           envBool("ZEN_IPV6_PREFER", true),
 		ForceIPv6:            envBool("ZEN_FORCE_IPV6", false),
+		RotateIP:             envBool("ZEN_ROTATE_IP", true),
 		ForceChatCompletions: envBool("ZEN_FORCE_CHAT_COMPLETIONS", false),
 		LogLevel:             envStr("LOG_LEVEL", "info"),
 	}

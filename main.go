@@ -45,6 +45,7 @@ func main() {
 			"upstream", cfg.UpstreamBase,
 			"auth_required", cfg.AuthKey != "",
 			"socks5", cfg.Socks5 != "",
+			"rotate_ip", cfg.RotateIP,
 			"retry_max", cfg.RetryMax,
 			"circuit_failures", cfg.CircuitFailures,
 		)

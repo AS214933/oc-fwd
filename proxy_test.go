@@ -700,3 +700,53 @@ func TestSocks5TrafficGoesThroughProxy(t *testing.T) {
 		t.Fatal("no SOCKS5 handshake recorded: traffic did not go through the socks5 proxy")
 	}
 }
+
+func TestRotateIPFreshConnectionPerRequest(t *testing.T) {
+	socks := newMinimalSocks5Server(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.Socks5 = "socks5://" + socks.addr()
+	cfg.RotateIP = true
+	p := newTestProxy(t, cfg)
+
+	for i := 0; i < 3; i++ {
+		rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+			`{"model":"m","messages":[]}`, nil)
+		if rec.Code != 200 {
+			t.Fatalf("request %d status = %d body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if got := socks.handshakes.Load(); got < 3 {
+		t.Fatalf("expected a fresh SOCKS5 connection per request (rotate_ip), got %d handshakes for 3 requests", got)
+	}
+}
+
+func TestRotateIPOffReusesConnection(t *testing.T) {
+	socks := newMinimalSocks5Server(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.Socks5 = "socks5://" + socks.addr()
+	cfg.RotateIP = false
+	p := newTestProxy(t, cfg)
+
+	for i := 0; i < 3; i++ {
+		rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+			`{"model":"m","messages":[]}`, nil)
+		if rec.Code != 200 {
+			t.Fatalf("request %d status = %d body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if got := socks.handshakes.Load(); got != 1 {
+		t.Fatalf("expected keep-alive reuse with rotate off, got %d handshakes for 3 requests", got)
+	}
+}

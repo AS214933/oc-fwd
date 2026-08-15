@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -47,6 +48,17 @@ func newProxy(cfg Config, log *slog.Logger) (*Proxy, error) {
 		ForceAttemptHTTP2:     true,
 		// No total ResponseHeaderTimeout: prefill for very long prompts can
 		// take minutes and streaming responses stay open for a long time.
+	}
+	if cfg.RotateIP {
+		// Every request gets a fresh TCP connection through the socks5 proxy
+		// so per-connection random exit IPs (e.g. rotating IPv6) actually
+		// rotate. Connection pooling would pin all requests to one exit IP
+		// and make upstream IP-based rate limits kick in again.
+		tr.DisableKeepAlives = true
+		// HTTP/2 multiplexes requests over one connection, which defeats
+		// rotation; fall back to HTTP/1.1 when rotating.
+		tr.ForceAttemptHTTP2 = false
+		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	}
 	if cfg.Socks5 != "" {
 		dialer, err := newSocks5Dialer(cfg.Socks5)
