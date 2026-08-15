@@ -158,6 +158,7 @@ func (p *Proxy) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", p.requireAuth(p.handleCompletion("/chat/completions")))
 	mux.HandleFunc("POST /v1/responses", p.requireAuth(p.handleCompletion("/responses")))
 	mux.HandleFunc("GET /v1/models", p.requireAuth(p.handleModels))
+	mux.HandleFunc("GET /debug/upstream-ip", p.requireAuth(p.handleDebugUpstreamIP))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, "ok")
@@ -206,16 +207,24 @@ func (p *Proxy) handleCompletion(upstreamPath string) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid JSON body", "invalid_request_error")
 			return
 		}
-		upstreamModel, ok := p.resolveModel(meta.Model)
-		if !ok {
-			writeError(w, http.StatusBadRequest,
-				fmt.Sprintf("model %q is not allowed by this proxy", meta.Model), "model_not_found")
-			return
-		}
-		// Rewrite the model field in the upstream request when aliased.
-		rewrite := upstreamModel != meta.Model
-		if rewrite {
-			body = rewriteBodyModel(body, upstreamModel)
+		// ZEN_FORCE_CHAT_COMPLETIONS bypasses the model allowlist/alias
+		// rewriting and forwards chat completions verbatim to the upstream.
+		force := p.cfg.ForceChatCompletions && upstreamPath == "/chat/completions"
+		upstreamModel := meta.Model
+		rewrite := false
+		if !force {
+			var ok bool
+			upstreamModel, ok = p.resolveModel(meta.Model)
+			if !ok {
+				writeError(w, http.StatusBadRequest,
+					fmt.Sprintf("model %q is not allowed by this proxy", meta.Model), "model_not_found")
+				return
+			}
+			// Rewrite the model field in the upstream request when aliased.
+			rewrite = upstreamModel != meta.Model
+			if rewrite {
+				body = rewriteBodyModel(body, upstreamModel)
+			}
 		}
 
 		if p.sem != nil {
@@ -334,6 +343,96 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 // doUpstream sends the request to opencode zen, retrying on 429 with
 // exponential backoff (+ jitter), honoring Retry-After, and opening the
 // circuit breaker after consecutive 429s so the upstream is shielded.
+// handleDebugUpstreamIP reports which IP family/address the proxy would use
+// to reach the upstream (through the same socks5 + ipv6-prefer dial path).
+func (p *Proxy) handleDebugUpstreamIP(w http.ResponseWriter, r *http.Request) {
+	ip, family, err := p.probeUpstreamIP(r.Context())
+	payload := map[string]any{
+		"upstream":    p.cfg.UpstreamBase,
+		"socks5":      p.cfg.Socks5 != "",
+		"ipv6_prefer": p.cfg.IPv6Prefer,
+	}
+	if err != nil {
+		payload["error"] = err.Error()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(payload)
+		return
+	}
+	payload["ip"] = ip.String()
+	payload["family"] = family
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payload)
+}
+
+func (p *Proxy) probeUpstreamIP(ctx context.Context) (net.IP, string, error) {
+	u, err := url.Parse(p.cfg.UpstreamBase)
+	if err != nil || u.Hostname() == "" {
+		return nil, "", fmt.Errorf("invalid upstream: %s", p.cfg.UpstreamBase)
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+
+	var base func(ctx context.Context, network, address string) (net.Conn, error)
+	if p.cfg.Socks5 != "" {
+		d, err := newSocks5Dialer(p.cfg.Socks5)
+		if err != nil {
+			return nil, "", err
+		}
+		base = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return d.Dial(network, address)
+		}
+	} else {
+		nd := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		base = nd.DialContext
+	}
+
+	if !p.cfg.IPv6Prefer {
+		conn, err := base(ctx, "tcp", net.JoinHostPort(host, port))
+		if err != nil {
+			return nil, "", err
+		}
+		defer conn.Close()
+		ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+		if err != nil {
+			return nil, "", err
+		}
+		parsed := net.ParseIP(ip)
+		return parsed, ipFamily(parsed), nil
+	}
+
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, "", err
+	}
+	var lastErr error
+	for _, ip := range orderIPs(ips, true) {
+		conn, err := base(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			conn.Close()
+			return ip, ipFamily(ip), nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no usable address for %s", host)
+	}
+	return nil, "", lastErr
+}
+
+func ipFamily(ip net.IP) string {
+	if ip == nil {
+		return "unknown"
+	}
+	if ip.To4() != nil {
+		return "ipv4"
+	}
+	return "ipv6"
+}
+
 func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream bool) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		if !p.circuit.Allow() {

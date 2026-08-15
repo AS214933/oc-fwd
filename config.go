@@ -11,24 +11,25 @@ import (
 // Config holds all runtime settings. Every knob is optional and driven by
 // environment variables so the same binary is easy to run in Docker.
 type Config struct {
-	Listen             string
-	UpstreamBase       string
-	UpstreamAPIKey     string // optional: key used when calling opencode zen
-	Socks5             string // optional: socks5://user:pass@host:port
-	Models             []string
-	ModelMap           map[string]string // alias -> upstream model id
-	AuthKey            string            // optional: key callers must present
-	RetryMax           int
-	RetryBaseBackoff   time.Duration
-	RetryMaxBackoff    time.Duration
-	CircuitFailures    int
-	CircuitCooldown    time.Duration
-	MaxBodyBytes       int64
-	UpstreamTimeout    time.Duration
-	UpstreamTimeoutSet bool
-	MaxConcurrency     int
-	IPv6Prefer         bool
-	LogLevel           string
+	Listen               string
+	UpstreamBase         string
+	UpstreamAPIKey       string // optional: key used when calling opencode zen
+	Socks5               string // optional: socks5://user:pass@host:port
+	Models               []string
+	ModelMap             map[string]string // alias -> upstream model id
+	AuthKey              string            // optional: key callers must present
+	RetryMax             int
+	RetryBaseBackoff     time.Duration
+	RetryMaxBackoff      time.Duration
+	CircuitFailures      int
+	CircuitCooldown      time.Duration
+	MaxBodyBytes         int64
+	UpstreamTimeout      time.Duration
+	UpstreamTimeoutSet   bool
+	MaxConcurrency       int
+	IPv6Prefer           bool
+	ForceChatCompletions bool
+	LogLevel             string
 }
 
 func envStr(key, def string) string {
@@ -83,21 +84,22 @@ func parseModelMap(s string) (map[string]string, error) {
 
 func loadConfig() (Config, error) {
 	cfg := Config{
-		Listen:           envStr("LISTEN_ADDR", ":8080"),
-		UpstreamBase:     strings.TrimRight(envStr("ZEN_UPSTREAM", "https://opencode.ai/zen/v1"), "/"),
-		UpstreamAPIKey:   envStr("ZEN_UPSTREAM_API_KEY", ""),
-		Socks5:           envStr("ZEN_SOCKS5", ""),
-		AuthKey:          envStr("ZEN_AUTH_KEY", ""),
-		RetryMax:         envInt("ZEN_RETRY_MAX", 3),
-		RetryBaseBackoff: envSeconds("ZEN_RETRY_BACKOFF_SECONDS", 2),
-		RetryMaxBackoff:  envSeconds("ZEN_RETRY_MAX_BACKOFF_SECONDS", 30),
-		CircuitFailures:  envInt("ZEN_CIRCUIT_FAILURES", 5),
-		CircuitCooldown:  envSeconds("ZEN_CIRCUIT_COOLDOWN_SECONDS", 30),
-		MaxBodyBytes:     int64(envInt("ZEN_MAX_BODY_MB", 128)) << 20,
-		UpstreamTimeout:  envSeconds("ZEN_UPSTREAM_TIMEOUT_SECONDS", 600),
-		MaxConcurrency:   envInt("ZEN_MAX_CONCURRENCY", 0),
-		IPv6Prefer:       envBool("ZEN_IPV6_PREFER", true),
-		LogLevel:         envStr("LOG_LEVEL", "info"),
+		Listen:               envStr("LISTEN_ADDR", ":8080"),
+		UpstreamBase:         strings.TrimRight(envStr("ZEN_UPSTREAM", "https://opencode.ai/zen/v1"), "/"),
+		UpstreamAPIKey:       envStr("ZEN_UPSTREAM_API_KEY", ""),
+		Socks5:               envStr("ZEN_SOCKS5", ""),
+		AuthKey:              envStr("ZEN_AUTH_KEY", ""),
+		RetryMax:             envInt("ZEN_RETRY_MAX", 3),
+		RetryBaseBackoff:     envSeconds("ZEN_RETRY_BACKOFF_SECONDS", 2),
+		RetryMaxBackoff:      envSeconds("ZEN_RETRY_MAX_BACKOFF_SECONDS", 30),
+		CircuitFailures:      envInt("ZEN_CIRCUIT_FAILURES", 5),
+		CircuitCooldown:      envSeconds("ZEN_CIRCUIT_COOLDOWN_SECONDS", 30),
+		MaxBodyBytes:         int64(envInt("ZEN_MAX_BODY_MB", 128)) << 20,
+		UpstreamTimeout:      envSeconds("ZEN_UPSTREAM_TIMEOUT_SECONDS", 600),
+		MaxConcurrency:       envInt("ZEN_MAX_CONCURRENCY", 0),
+		IPv6Prefer:           envBool("ZEN_IPV6_PREFER", true),
+		ForceChatCompletions: envBool("ZEN_FORCE_CHAT_COMPLETIONS", false),
+		LogLevel:             envStr("LOG_LEVEL", "info"),
 	}
 	if cfg.UpstreamTimeout > 0 {
 		cfg.UpstreamTimeoutSet = true

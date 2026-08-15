@@ -345,3 +345,62 @@ func TestDialPrefersIPv6WithFallback(t *testing.T) {
 	}
 	conn.Close()
 }
+
+func TestForceChatCompletionsForwardsAnyModel(t *testing.T) {
+	var gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		gotModel = body.Model
+		fmt.Fprintf(w, `{"model":%q,"choices":[]}`, body.Model)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.Models = []string{"only-this"}
+	cfg.ForceChatCompletions = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"not-whitelisted","messages":[]}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("force forward status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotModel != "not-whitelisted" {
+		t.Fatalf("expected model forwarded verbatim, got %q", gotModel)
+	}
+
+	// without the flag the same request must be rejected
+	cfg.ForceChatCompletions = false
+	p2 := newTestProxy(t, cfg)
+	rec = doJSON(t, p2.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"not-whitelisted","messages":[]}`, nil)
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 without force flag, got %d", rec.Code)
+	}
+}
+
+func TestDebugUpstreamIP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = srv.URL
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "GET", "/debug/upstream-ip", "", nil)
+	if rec.Code != 200 {
+		t.Fatalf("debug ip status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		IP     string `json:"ip"`
+		Family string `json:"family"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Family != "ipv4" || out.IP != "127.0.0.1" {
+		t.Fatalf("unexpected probe result: %+v", out)
+	}
+}
