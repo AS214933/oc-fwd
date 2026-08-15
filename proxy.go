@@ -397,7 +397,13 @@ func convertResponsesToChat(body []byte) ([]byte, error) {
 				Text    string          `json:"text"`
 			}
 			if err := json.Unmarshal(raw, &it); err != nil {
-				return nil, err
+				// OpenAI responses input arrays may contain plain strings.
+				var s string
+				if serr := json.Unmarshal(raw, &s); serr == nil {
+					out.Messages = append(out.Messages, chatMsg{Role: "user", Content: s})
+					continue
+				}
+				return nil, fmt.Errorf("unsupported responses input item: %w", err)
 			}
 			if it.Type == "function_call" || it.Type == "function_call_output" {
 				continue

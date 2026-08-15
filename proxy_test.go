@@ -509,3 +509,30 @@ func TestMessagesPassthroughWithoutForce(t *testing.T) {
 		t.Fatalf("model = %q", gotModel)
 	}
 }
+
+func TestForceResponsesMixedStringInput(t *testing.T) {
+	var got struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"model":"m","choices":[]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.ForceChatCompletions = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/responses",
+		`{"model":"m","input":["hello",{"type":"message","role":"user","content":[{"type":"input_text","text":"world"}]}]}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(got.Messages) != 2 || got.Messages[0].Content != "hello" || got.Messages[1].Content != "world" {
+		t.Fatalf("bad conversion: %+v", got.Messages)
+	}
+}
