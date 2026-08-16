@@ -215,10 +215,11 @@ func (c *responsesStreamConverter) consume(payload []byte) [][]byte {
 
 	for _, choice := range chunk.Choices {
 		d := choice.Delta
-		if !c.msgAdded {
-			// The stream started with a text response (content role marker or
-			// the first text fragment) - introduce the message output item.
-			if d.Content != "" || d.Role != "" || len(d.ToolCalls) == 0 {
+		// Introduce the message output item lazily on the first real text
+		// fragment, so a pure tool-call stream does not emit a spurious empty
+		// assistant message that leaks into the client conversation history.
+		if d.Content != "" {
+			if !c.msgAdded {
 				c.msgAdded = true
 				events = append(events, c.event("response.output_item.added", map[string]any{
 					"output_index": 0,
@@ -233,8 +234,6 @@ func (c *responsesStreamConverter) consume(payload []byte) [][]byte {
 				}))
 				c.partAdded = true
 			}
-		}
-		if d.Content != "" {
 			c.text.WriteString(d.Content)
 			events = append(events, c.event("response.output_text.delta", map[string]any{
 				"item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": d.Content,

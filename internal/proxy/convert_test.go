@@ -244,4 +244,69 @@ func TestResponsesStreamConverterToolCall(t *testing.T) {
 	if completed == nil {
 		t.Fatalf("no response.completed")
 	}
+	if resp, ok := completed["response"].(map[string]any); ok {
+		if out, ok := resp["output"].([]any); ok {
+			for _, it := range out {
+				if m, ok := it.(map[string]any); ok && m["type"] == "message" {
+					t.Fatalf("pure tool-call stream must not emit an empty message item: %v", out)
+				}
+			}
+		}
+	}
+}
+
+func TestResponsesDeveloperRoleMappedToSystem(t *testing.T) {
+	in := `{
+		"model":"deepseek-v4-flash-free",
+		"input":[
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"follow the repo rules"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+		]
+	}`
+	out, err := convertResponsesToChat([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got chatBody
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("want 2 messages, got %d: %s", len(got.Messages), out)
+	}
+	if got.Messages[0].Role != "system" || got.Messages[0].Content != "follow the repo rules" {
+		t.Fatalf("developer role not mapped to system: %+v", got.Messages[0])
+	}
+	if got.Messages[1].Role != "user" {
+		t.Fatalf("second message role = %q", got.Messages[1].Role)
+	}
+}
+
+func TestResponsesFunctionCallFallsBackToItemID(t *testing.T) {
+	in := `{
+		"model":"m",
+		"input":[
+			{"type":"function_call","id":"item_42","name":"shell","arguments":"{\"command\":\"ls\"}"},
+			{"type":"function_call_output","id":"item_43","output":"a.txt"}
+		]
+	}`
+	out, err := convertResponsesToChat([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got chatBody
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("want 2 messages, got %d: %s", len(got.Messages), out)
+	}
+	asm := got.Messages[0]
+	if asm.Role != "assistant" || len(asm.ToolCalls) != 1 || asm.ToolCalls[0].ID != "item_42" {
+		t.Fatalf("assistant tool call id fallback wrong: %+v", asm)
+	}
+	tm := got.Messages[1]
+	if tm.Role != "tool" || tm.ToolCallID != "item_43" {
+		t.Fatalf("tool message wrong: %+v", tm)
+	}
 }

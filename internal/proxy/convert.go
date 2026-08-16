@@ -141,6 +141,18 @@ func convertToChatCompletions(format string, body []byte) ([]byte, error) {
 	return body, nil
 }
 
+// chatRole normalizes a Responses/Anthropic role into one the Chat
+// Completions API accepts. Codex sends its developer prompt as a "developer"
+// role message; zen-style chat upstreams only accept system/user/assistant/
+// tool, so map it to "system".
+func chatRole(role string) string {
+	switch role {
+	case "", "developer":
+		return "system"
+	}
+	return role
+}
+
 func convertResponsesToChat(body []byte) ([]byte, error) {
 	var in struct {
 		Model           string            `json:"model"`
@@ -203,11 +215,15 @@ func convertResponsesToChat(body []byte) ([]byte, error) {
 				// that a following function_call_output maps 1:1 (and the
 				// round-trip with tool results stays consistent). Chat
 				// Completions wants the arguments as a JSON-encoded string.
+				toolID := it.CallID
+				if toolID == "" {
+					toolID = it.ID
+				}
 				args, _ := json.Marshal(it.Arguments)
 				out.Messages = append(out.Messages, chatMsg{
 					Role: "assistant",
 					ToolCalls: []chatToolCall{{
-						ID:   it.CallID,
+						ID:   toolID,
 						Type: "function",
 						Function: chatToolFunc{
 							Name:      it.Name,
@@ -233,7 +249,7 @@ func convertResponsesToChat(body []byte) ([]byte, error) {
 				out.Messages = append(out.Messages, chatMsg{Role: "user", Content: it.Text})
 				continue
 			}
-			role := it.Role
+			role := chatRole(it.Role)
 			if role == "" {
 				role = "user"
 			}
@@ -321,7 +337,7 @@ func convertMessagesToChat(body []byte) ([]byte, error) {
 		out.Messages = append(out.Messages, chatMsg{Role: "system", Content: sys})
 	}
 	for _, m := range in.Messages {
-		role := m.Role
+		role := chatRole(m.Role)
 		if role == "" {
 			role = "user"
 		}
