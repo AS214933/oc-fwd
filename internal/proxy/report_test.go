@@ -192,3 +192,32 @@ func TestDebugModes(t *testing.T) {
 		t.Fatalf("expected m-a keyed, got %+v", got)
 	}
 }
+
+func TestDebugModesAcceptsStatusToken(t *testing.T) {
+	cfg := baseCfg()
+	cfg.AuthKey = "caller-secret"     // proxy is key-guarded
+	cfg.StatusToken = "status-secret" // status UI is allowed via this token
+	cfg.Models = []string{"m"}
+	p := newTestProxy(t, cfg)
+
+	// Without any credential the debug endpoint is 401.
+	rec := doJSON(t, p.Handler(), "GET", "/debug/modes", "", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without credentials, got %d", rec.Code)
+	}
+	// The caller key passes.
+	rec = doJSON(t, p.Handler(), "GET", "/debug/modes", "", map[string]string{"Authorization": "Bearer caller-secret"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with caller key, got %d", rec.Code)
+	}
+	// The status reporting token passes via X-Status-Token.
+	rec = doJSON(t, p.Handler(), "GET", "/debug/modes", "", map[string]string{"X-Status-Token": "status-secret"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with status token, got %d", rec.Code)
+	}
+	// A wrong token is rejected.
+	rec = doJSON(t, p.Handler(), "GET", "/debug/modes", "", map[string]string{"X-Status-Token": "nope"})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong token, got %d", rec.Code)
+	}
+}

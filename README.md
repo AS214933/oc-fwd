@@ -134,12 +134,15 @@ Status UI 关注的是**各模型的切换情况**：当且仅当某模型在状
 - **绿色** = 匿名模式运行中；**蓝色** = 已切换 API Key（匿名失败，降级）；**红色** = key 也失败（全部失败）。
 - 页面展示每个模型的当前状态、持续时长、累计切换次数、最近原因，以及完整切换时间线（旧状态 → 新状态 + 原因）。
 - Status UI 定期拉取反代的 `/debug/modes` 校准：即使 UI 重启或某次上报丢失，页面也能与反代当前真实状态对齐。
+- **401 说明**：反代配了 `ZEN_AUTH_KEY` 时，校准请求也需要凭证。两种方式任选其一：
+  - 给 Status UI 配 `STATUS_PROXY_AUTH=<同一个 ZEN_AUTH_KEY>`（Docker Compose 会自动从 `.env` 同步）；
+  - 或给反代配 `ZEN_STATUS_TOKEN`、给 Status UI 配 `STATUS_EVENT_TOKEN=<同一个值>`（校准请求用 `X-Status-Token` 访问 `/debug/modes`）。
 
 ### 运行
 
 ```bash
-# 本机直接运行（默认监听 :8090）
-STATUS_PROXY=http://127.0.0.1:8080 go run ./cmd/status-ui
+# 若反代配了 ZEN_AUTH_KEY，STATUS_PROXY_AUTH 填同一个值，否则校准会 401
+STATUS_PROXY=http://127.0.0.1:8080 STATUS_PROXY_AUTH=<反代的 ZEN_AUTH_KEY> go run ./cmd/status-ui
 # 让反代把模型切换上报到这个状态页
 ZEN_STATUS_URL=http://127.0.0.1:8090 ./zen-proxy
 ```

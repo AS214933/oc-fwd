@@ -142,3 +142,31 @@ func TestReconcileSeedsAndRecoversState(t *testing.T) {
 		t.Fatalf("expected m-b reconciled to anonymous, got %+v", snap.Models[1])
 	}
 }
+
+func TestReconcileSendsStatusToken(t *testing.T) {
+	// A key-guarded proxy that only accepts the status token for /debug/modes.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Status-Token") != "ev-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"models": []map[string]string{{"model": "m", "state": "keyed"}},
+		})
+	}))
+	defer proxy.Close()
+
+	c := NewChecker(Config{
+		Proxy:      proxy.URL,
+		EventToken: "ev-secret", // sends X-Status-Token on reconcile
+		Timeout:    time.Second,
+		History:    10,
+		Interval:   50 * time.Millisecond,
+	})
+	c.reconcile(context.Background())
+
+	snap := c.Snapshot()
+	if len(snap.Models) != 1 || snap.Models[0].State != StateKeyed {
+		t.Fatalf("expected model from token-authed reconcile, got %+v", snap.Models)
+	}
+}

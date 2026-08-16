@@ -156,6 +156,9 @@ func (c *Checker) reconcile(ctx context.Context) {
 	if c.cfg.ProxyAuth != "" {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.ProxyAuth)
 	}
+	if c.cfg.EventToken != "" {
+		req.Header.Set("X-Status-Token", c.cfg.EventToken)
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		c.reconcileWhenUnavailable()

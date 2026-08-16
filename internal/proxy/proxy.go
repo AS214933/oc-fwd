@@ -107,8 +107,11 @@ func (p *Proxy) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/responses", p.requireAuth(p.handleCompletion("responses")))
 	mux.HandleFunc("POST /v1/messages", p.requireAuth(p.handleCompletion("messages")))
 	mux.HandleFunc("GET /v1/models", p.requireAuth(p.handleModels))
-	mux.HandleFunc("GET /debug/upstream-ip", p.requireAuth(p.handleDebugUpstreamIP))
-	mux.HandleFunc("GET /debug/modes", p.requireAuth(p.handleDebugModes))
+	// Debug endpoints are consumed by ops tooling (the bundled Status UI).
+	// Besides the caller key they also accept the status reporting token so
+	// the UI can talk to a key-guarded proxy without juggling two secrets.
+	mux.HandleFunc("GET /debug/upstream-ip", p.requireDebugAuth(p.handleDebugUpstreamIP))
+	mux.HandleFunc("GET /debug/modes", p.requireDebugAuth(p.handleDebugModes))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, "ok")
@@ -124,6 +127,22 @@ func (p *Proxy) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+// requireDebugAuth guards the debug endpoints: a caller key (ZEN_AUTH_KEY)
+// passes, and so does the status reporting token (ZEN_STATUS_TOKEN) sent as
+// X-Status-Token when it is configured.
+func (p *Proxy) requireDebugAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if p.cfg.StatusToken != "" {
+			got := r.Header.Get("X-Status-Token")
+			if subtle.ConstantTimeCompare([]byte(got), []byte(p.cfg.StatusToken)) == 1 {
+				next(w, r)
+				return
+			}
+		}
+		p.requireAuth(next)(w, r)
 	}
 }
 
