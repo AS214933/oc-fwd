@@ -140,6 +140,22 @@ main { max-width: 1080px; margin: 0 auto; padding: 24px 32px 48px; }
 .bars i.blue { background: var(--blue); opacity: .9; }
 .bars i.red { background: var(--red); opacity: .9; }
 
+.hist { margin-top: 12px; }
+.hist .bar {
+  display: flex; gap: 2px; height: 18px;
+  border-radius: 4px; overflow: hidden;
+  border: 1px solid var(--border);
+}
+.hist .bar i { min-width: 2px; }
+.hist .bar i.green { background: var(--green); }
+.hist .bar i.blue { background: var(--blue); }
+.hist .bar i.red { background: var(--red); }
+.hist .bar i.unknown { background: var(--unknown); opacity: .4; }
+.hist-label {
+  display: block; margin-top: 5px;
+  font-size: 11px; color: var(--muted);
+}
+
 .panel {
   margin-top: 28px; background: var(--panel);
   border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px;

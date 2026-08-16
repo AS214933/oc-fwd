@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  // state -> {label, pillClass, tooltip}
+  // state -> {label, pillClass, sub}
   var STATES = {
     anonymous: { label: "匿名", cls: "green", sub: "匿名模式运行中" },
     keyed: { label: "已切 Key", cls: "blue", sub: "已切换 API Key（匿名失败）" },
@@ -57,21 +57,26 @@
     return ev.detail ? r + " · " + ev.detail : r;
   }
 
-  function barsFor(model, timeline) {
-    var states = [];
-    (timeline || []).forEach(function (ev) {
-      if (ev.model !== model || !STATES[ev.to]) return;
-      var last = states[states.length - 1];
-      if (last === ev.to) return; // dedupe consecutive same states
-      states.push(ev.to);
-    });
-    if (!states.length && STATES[model]) {
-      states = ["unknown"];
+  // Per-model history bar, weighted by real time: each state segment spans
+  // from its event until the next event (or now), so a model that stayed
+  // green for a long time shows a long green bar and a brief keyed episode
+  // shows a thin blue slice - like status-page uptime graphs.
+  function historyBar(model, timeline, nowMs) {
+    var evs = (timeline || []).filter(function (e) {
+      return e.model === model && STATES[e.to];
+    }).sort(function (a, b) { return a.at - b.at; });
+    if (!evs.length) {
+      return "<div class=\"bar\"><i class=\"unknown\" style=\"flex:1\"></i></div>";
     }
-    return states.slice(-60).map(function (s) {
-      return "<i class=\"" + (STATES[s] ? STATES[s].cls : "unknown") + "\" " +
-        "title=\"" + (STATES[s] ? STATES[s].label : s) + "\"></i>";
+    var start = evs[0].at;
+    var total = Math.max(1, nowMs - start);
+    var html = evs.map(function (ev, i) {
+      var to = i + 1 < evs.length ? evs[i + 1].at : Math.max(nowMs, ev.at + 1);
+      var flex = Math.max(0.5, (to - ev.at) / total * 100);
+      return "<i class=\"" + STATES[ev.to].cls + "\" style=\"flex:" + flex.toFixed(2) + "\"" +
+        " title=\"" + STATES[ev.to].label + "\"></i>";
     }).join("");
+    return "<div class=\"bar\">" + html + "</div>";
   }
 
   function render(snap) {
@@ -88,11 +93,11 @@
     var models = snap.models || [];
     var grid = el("models");
     if (!models.length) {
-      grid.innerHTML = "<div class=\"empty muted\">暂无模型状态</div>";
+      grid.innerHTML = "<div class=\"empty muted\">暂无模型状态（等待反代上报或 /debug/modes 可用）</div>";
     } else {
       grid.innerHTML = models.map(function (m) {
         var st = STATES[m.state] || STATES.unknown;
-        var bars = barsFor(m.model, snap.timeline);
+        var bar = historyBar(m.model, snap.timeline, Date.now());
         return "<article class=\"card\">" +
           "<div class=\"head\">" +
           "<span class=\"name\">" + esc(m.model) + "</span>" +
@@ -104,7 +109,8 @@
           "<div><dt>累计切换</dt><dd>" + m.switches + " 次</dd></div>" +
           "<div><dt>最近原因</dt><dd>" + esc(reasonText(m.last_event) || "—") + "</dd></div>" +
           "</dl>" +
-          "<div class=\"bars\">" + bars + "</div>" +
+          "<div class=\"hist\">" + bar +
+          "<span class=\"hist-label\">历史状态（按时间加权，绿=匿名 / 蓝=key / 红=失败）</span></div>" +
           "</article>";
       }).join("");
     }
