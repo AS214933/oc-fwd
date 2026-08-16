@@ -20,9 +20,9 @@ Status UI 关注的是**各模型的切换情况**：当且仅当某模型在状
 
 ```bash
 # 若反代配了 ZEN_AUTH_KEY，STATUS_PROXY_AUTH 填同一个值，否则校准会 401
-STATUS_PROXY=http://127.0.0.1:8080 STATUS_PROXY_AUTH=<反代的 ZEN_AUTH_KEY> go run ./cmd/status-ui
+STATUS_PROXY=http://127.0.0.1:8080 STATUS_PROXY_AUTH=<反代的 ZEN_AUTH_KEY> bun run src/cmd/status-ui.ts
 # 让反代把模型切换上报到这个状态页
-ZEN_STATUS_URL=http://127.0.0.1:8090 ./zen-proxy
+ZEN_STATUS_URL=http://127.0.0.1:8090 bun run src/cmd/zenproxy.ts
 ```
 
 Docker Compose 已内置 `status-ui` 服务（`http://<host>:8090`），在 `.env` 配置 `STATUS_*` 即可。

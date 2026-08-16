@@ -1,6 +1,6 @@
 # 配置与环境变量
 
-所有配置均可选，通过环境变量驱动，同一个二进制在 Docker 内外都能跑。
+所有配置均可选，通过环境变量驱动，同一份代码在 Docker 内外都能跑。
 
 ## 反代环境变量
 
@@ -24,6 +24,7 @@
 | `ZEN_FORCE_CHAT_INBOUND` | `false` | 只接受 `/v1/chat/completions` 入站，`/v1/responses` 与 `/v1/messages` 直接报错 |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
+| `ZEN_MODEL_ENDPOINTS` | 空 | 模型→上游协议覆盖，如 `gpt-5.4=chat`（`chat`/`responses`/`messages`/`gemini`） |
 | `ZEN_AUTH_KEY` | 空 | 调用本反代需带的 key；留空 = 免鉴权 |
 | `ZEN_RETRY_MAX` | `3` | 429 最大重试次数 |
 | `ZEN_RETRY_BACKOFF_SECONDS` | `2` | 退避基数（指数增长 + 抖动） |

@@ -1,24 +1,55 @@
-# 强制统一为 Chat Completions
+# 模型驱动的入站 / 出站自动转换
 
-反代有两个独立的开关，分别强制「转发（上游）」与「入站（客户端）」使用 Chat Completions。
+本代理的核心是"sub2api 式"的协议转换：客户端用自己习惯的协议发起请求，代理根据**用户请求的模型**自动选择 zen 的上游协议并双向转换。
 
-## 强制转发：`ZEN_FORCE_CHAT_COMPLETIONS=true`
+## 入站（客户端 → 代理）
 
-所有请求统一转成 Chat Completions 转发到上游 `/v1/chat/completions`：
+| 端点 | 协议 |
+| --- | --- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions |
+| `POST /v1/responses` | OpenAI Responses API（codex / opencode 等） |
+| `POST /v1/messages` | Anthropic Messages API |
 
-- `/v1/chat/completions`：原样透传（不查白名单 / 不改写）；
-- `/v1/responses`：请求转 Chat Completions（`instructions`→system、`input`→user/assistant、`max_output_tokens`→`max_tokens`、tools 转换），**响应再转回 Responses 格式**（非流式 `response` 对象，流式 `response.created` / `response.output_text.delta` / `response.completed` 等事件），codex / opencode 等 `/v1/responses` 客户端可正常解析；
-- 工具调用双向转换：`function_call` → `tool_calls` assistant 消息、`function_call_output` → `role=tool`，`call_id` 原样保留（`call_id` 缺失时回退到条目 `id`）；
-- 角色归一化：`developer` → `system`（Codex 的开发者提示会以 `developer` 角色发送，而 zen 类 chat 上游只接受 `system` / `user` / `assistant` / `tool`）；
-- `/v1/messages`（Anthropic）：`system` / `messages` / `tools` / `max_tokens` 转换后转发；
+## 出站（代理 → opencode zen）
+
+模型 → 上游协议由内置模型表决定（数据来自 [opencode zen 官方模型表](https://opencode.ai/docs/zh-cn/zen/#%E6%A8%A1%E5%9E%8B)，2026-08-16 抓取）：
+
+| 模型家族 | 上游端点 | 协议 |
+| --- | --- | --- |
+| `gpt-5.x*`、`grok-*`、`muse-*` | `/v1/responses` | OpenAI Responses |
+| `claude-*`、`qwen3.x-*` | `/v1/messages` | Anthropic Messages |
+| `gemini-*` | `/v1/models/<model-id>` | Google Gemini generateContent |
+| `deepseek-*`、`minimax-*`、`glm-*`、`kimi-*`、免费模型 | `/v1/chat/completions` | OpenAI Chat Completions |
+
+- 表内精确匹配优先，其次前缀启发式（如 `gpt-` → responses、`claude-` → messages），未知名模型默认走 Chat Completions；
+- 可用 `ZEN_MODEL_ENDPOINTS=model=chat|responses|messages|gemini` 覆盖单个模型；
+- `ZEN_MODEL_MAP` 别名先解析成上游模型 id，再按上游 id 选协议；
+- `ZEN_FORCE_CHAT_COMPLETIONS=true` 时不看模型家族，全部转 Chat Completions。
+
+## 转换矩阵
+
+任意入站协议 × 任意出站协议均可转换，非流式与流式（SSE）都支持：
+
+| 入站 \\ 出站 | chat | responses | messages | gemini |
+| --- | --- | --- | --- | --- |
+| chat | 透传 | ✓ | ✓ | ✓ |
+| responses | ✓ | 透传 | ✓ | ✓ |
+| messages | ✓ | ✓ | 透传 | ✓ |
+
+转换细节：
+
+- **Requests**：`instructions` → system 消息、`input`（字符串 / 条目数组）→ messages、`max_output_tokens` → `max_tokens`、`function_call` / `function_call_output` → assistant `tool_calls` / `tool` 消息（`call_id` 原样保留）、`developer` 角色 → `system`；
+- **Responses 响应**：chat.completion → `resp_*` response 对象（message / function_call 输出条目）；流式输出 `response.created` → `response.output_text.delta` → `response.completed` 事件序列；
+- **Messages**：`system` / `messages` / `tools` / `max_tokens`；`tool_use` ↔ `tool_calls`、`tool_result` ↔ `role=tool`；响应 `stop_reason` ↔ `finish_reason`；流式输出 Anthropic 事件序列；
+- **Gemini**：`contents` / `systemInstruction` / `generationConfig` / `tools.functionDeclarations`；`functionCall` ↔ `tool_calls`、`functionResponse` ↔ `role=tool`；
 - 图片等非文本 content 目前会被忽略（纯文本转换）。
 
-`false`（默认）时各端点按原生格式转发（`/v1/responses → /responses`、`/v1/messages → /messages`），模型白名单 / 别名对三个端点均生效。
+## 兼容模式开关
 
-## 强制入站：`ZEN_FORCE_CHAT_INBOUND=true`
+- `ZEN_FORCE_CHAT_COMPLETIONS=true`：所有请求统一转 Chat Completions 转发（`/v1/chat/completions` 原样透传），响应再转回入站协议；
+- `ZEN_FORCE_CHAT_INBOUND=true`：只接受 `/v1/chat/completions` 入站，`/v1/responses` 与 `/v1/messages` 直接 400，客户端必须使用 Chat Completions 协议（如 opencode 配置 `provider` 为 `api: "openai"`、`options.baseURL` 指向本代理）。
 
-只接受 Chat Completions 格式的入站请求：`/v1/chat/completions` 正常转发（配合 `ZEN_FORCE_CHAT_COMPLETIONS` 或不配合均可），`/v1/responses` 与 `/v1/messages` 直接返回 400 并提示客户端改用 `/v1/chat/completions`。
+## 流式注意事项
 
-适用场景：客户端本身能说 Chat Completions（例如 opencode 配置 `provider` 为 `api: "openai"`、`options.baseURL` 指向本反代），希望避免 Responses ↔ Chat 双向转换的损耗与兼容性风险，强制所有客户端走 Chat Completions。
-
-注意：新版 Codex CLI 已移除 `wire_api = "chat"`，只支持 Responses 协议；用 Codex 接入时应保持 `ZEN_FORCE_CHAT_INBOUND=false`，走上面的 `/v1/responses` 双向转换。
+- 上游忽略 `stream=true` 返回单次 JSON 时，代理会补发最小 SSE 事件序列（chat：单条 data + `[DONE]`；responses：`response.created` / `response.completed`；messages：完整 Anthropic 事件序列），流式客户端不会挂起；
+- 工具调用的流式转换同样可用：`tool_calls` 增量 → responses `function_call_arguments.delta` / anthropic `input_json_delta`。

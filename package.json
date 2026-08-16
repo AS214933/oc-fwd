@@ -1,0 +1,20 @@
+{
+  "name": "oc-fwd",
+  "version": "2.0.0",
+  "description": "sub2api-style reverse proxy for opencode zen, written in TypeScript + Bun",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/cmd/zenproxy.ts",
+    "dev": "bun --watch run src/cmd/zenproxy.ts",
+    "status-ui": "bun run src/cmd/status-ui.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:e2e": "bun test e2e/",
+    "test:unit": "bun test src/"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.6.0"
+  }
+}

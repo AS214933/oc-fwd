@@ -1,16 +1,40 @@
-# zen-proxy
+# oc-fwd (zen-proxy)
 
-一个简单、高并发的 [opencode ai zen](https://opencode.ai/zen) 反向代理，使用 Go 编写。
+一个专门转发 [opencode ai zen](https://opencode.ai/zen) 的 **sub2api** 风格反向代理，使用 **TypeScript + Bun** 编写（无 Go 依赖）。
 
-- 对外暴露 **OpenAI 兼容**接口：`/v1/chat/completions`（支持 SSE 流式）、`/v1/responses`、`/v1/messages`、`/v1/models`、`/healthz`
-- 强制 Chat Completions：`ZEN_FORCE_CHAT_COMPLETIONS` 统一把 responses/messages 转成 Chat Completions 转发（codex 可正常解析回传的 Responses 格式），`ZEN_FORCE_CHAT_INBOUND` 则强制客户端只用 `/v1/chat/completions`
-- 调用上游可**匿名**（zen free）或带 key（`ZEN_UPSTREAM_API_KEY`），caller 鉴权可选（`ZEN_AUTH_KEY`）
-- 支持模型白名单与别名映射（`ZEN_MODELS` / `ZEN_MODEL_MAP`）
-- 支持 **socks5** 代理，默认 **IPv6 优先**（可强制只走 IPv6）
-- 内置 **429 自动重试 + 熔断**（退避 + 抖动 + Retry-After），上游非 200（400/503 等）一律走重试与「匿名失败自动回退 API key」，错误不会漏给用户
-- 附赠独立的 **Status UI** 状态页：模型每次 匿名 / API Key / 全部失败 切换都会实时上报展示
+对外暴露 **OpenAI 兼容**接口，内部自动按用户请求的模型选择 zen 的上游协议并做**入站 ⇄ 出站双向转换**：
+
+- 入站：`/v1/chat/completions`、`/v1/responses`（codex / opencode）、`/v1/messages`（Anthropic）
+- 出站：按模型自动选择，数据来自 [opencode zen 官方模型表](https://opencode.ai/docs/zh-cn/zen/#模型)：
+  - `gpt-5.x` / `grok-*` / `muse-*` → `/v1/responses`（Responses API）
+  - `claude-*` / `qwen3.x-*` → `/v1/messages`（Anthropic Messages）
+  - `gemini-*` → `/v1/models/<id>`（Gemini generateContent）
+  - `deepseek-*` / `minimax-*` / `glm-*` / `kimi-*` / 免费模型 → `/v1/chat/completions`
+- 任意客户端协议 × 任意模型都能互相转换（含流式 SSE 与工具调用），例如：
+  - `chat` 客户端请求 `gpt-5.6-sol` → 自动转成 Responses 请求发到 `/v1/responses`，再把响应转回 `chat.completion`；
+  - `responses` 客户端请求 `claude-opus-5` → 自动转成 Anthropic `messages` 请求，响应再转回 Responses 事件流。
+
+## 特性
+
+- 模型白名单 / 别名（`ZEN_MODELS` / `ZEN_MODEL_MAP`）、协议覆盖（`ZEN_MODEL_ENDPOINTS`）
+- 匿名调用（zen free）或带 key（`ZEN_UPSTREAM_API_KEY` / `ZEN_API_KEYS_FILE` 随机轮换）
+- 调用方鉴权（`ZEN_AUTH_KEY`）
+- 429 自动重试 + 熔断 + 匿名失败自动回退 API key
+- socks5 代理、IPv6 优先、每请求新连接（`ZEN_SOCKS5` / `ZEN_IPV6_PREFER` / `ZEN_ROTATE_IP`）
+- 兼容模式：`ZEN_FORCE_CHAT_COMPLETIONS`（统一 chat 出站）、`ZEN_FORCE_CHAT_INBOUND`（只收 chat）
+- 附赠 Status UI 状态页（模型 匿名 / API Key / 全部失败 实时展示）
 
 ## 快速开始
+
+### 直接运行（需要 [Bun](https://bun.sh) ≥ 1.1）
+
+```bash
+bun install
+ZEN_MODELS=deepseek-v4-flash-free bun run src/cmd/zenproxy.ts
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}'
+```
 
 ### Docker Compose
 
@@ -19,11 +43,12 @@ cp .env.example .env
 docker compose up -d --build   # 反代 :8080 + Status UI :8090
 ```
 
-### 直接运行
+## 测试
 
 ```bash
-go build -o zen-proxy ./cmd/zenproxy
-ZEN_MODELS=deepseek-v4-flash-free ./zen-proxy
+bun run typecheck   # tsc --noEmit
+bun test            # 单元测试
+bun run test:e2e    # 端到端（启动真实代理 + mock zen 网关，覆盖全部转换矩阵）
 ```
 
 ## 文档
@@ -31,35 +56,18 @@ ZEN_MODELS=deepseek-v4-flash-free ./zen-proxy
 | 主题 | 链接 |
 | --- | --- |
 | 配置与环境变量、调用示例 | [docs/configuration.md](docs/configuration.md) |
+| 模型驱动的入站/出站自动转换 | [docs/conversion.md](docs/conversion.md) |
 | socks5、IPv6 与高并发 | [docs/networking.md](docs/networking.md) |
 | 重试、熔断与匿名回退 API Key | [docs/retry-and-fallback.md](docs/retry-and-fallback.md) |
-| 强制统一为 Chat Completions 转发 | [docs/conversion.md](docs/conversion.md) |
 | 状态页 Status UI | [docs/status-ui.md](docs/status-ui.md) |
 
 ## 项目结构
 
 ```text
-cmd/zenproxy/            # 反代入口
-cmd/status-ui/           # Status UI 入口（独立进程 / 端口，嵌入静态前端）
- status/                  # Status UI：配置、事件采集器、HTTP 服务与前端资源
-internal/config/         # 配置与环境变量解析
-internal/circuit/        # 429 熔断器
-internal/proxy/          # 代理核心（proxy/handler/dial/convert/upstream/stream）
-```
-
-## 构建与测试
-
-```bash
-go test ./...
-go vet ./...
-docker build -t zen-proxy .
-```
-
-## GHCR 自动构建推送
-
-推送到 `main` 自动构建 `latest`，推送 `v*` 标签构建对应版本，手动触发亦可；Buildx 构建 `linux/amd64,linux/arm64` 双架构镜像并推送到 `ghcr.io/<owner>/<repo>`。
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
+src/cmd/zenproxy.ts       # 反代入口
+src/cmd/status-ui.ts      # Status UI 入口（独立进程 / 端口）
+src/proxy/                # 代理核心（handler / upstream / circuit / fallback / dial）
+src/convert/              # 转换层（chat / responses / messages / gemini，含流式）
+src/status/               # Status UI（事件采集 + HTTP 服务 + 静态前端）
+e2e/                      # 端到端测试（mock zen 网关）
 ```

@@ -13,7 +13,7 @@
 - **拼接式 socks5 握手**：greeting / 鉴权 / CONNECT 一次写完，少等 2~3 个 RTT（对比逐段协商），同时拨号受 context 与 `ZEN_DIAL_TIMEOUT_SECONDS` 限制，代理无响应时快速失败而不是让请求堆积；
 - **TLS 会话复用**：同一上游的 TLS ticket 在进程内缓存，新 TCP 连接握手从完整握手降为 1 个 RTT。ticket 跟上游服务器绑定、与客户端出口 IP 无关，所以换出口 IP 不影响复用；socks5 连接本身依然每次新建、绝不复用；
 - **本地 DNS 缓存**：`ZEN_IPV6_PREFER=true` 时高并发下大量相同域名解析会被去重合并（single-flight + TTL），TTL 由 `ZEN_DNS_CACHE_TTL_SECONDS` 控制；
-- **减少热路径锁**：回退状态的读取走 RWMutex 读锁，随机 key 选择改作并发安全的全局随机，不再争用每请求互斥锁。
+- **轻量并发控制**：回退状态读取与随机 key 选择均为无锁 / 轻锁路径，避免热路径争用。
 
 ## 判断每次连接是否真的走了 IPv6
 

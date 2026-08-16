@@ -1,24 +1,14 @@
-# ---- build stage ----
-FROM golang:1.24-alpine AS build
-WORKDIR /src
-RUN apk add --no-cache ca-certificates git
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/zen-proxy ./cmd/zenproxy
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/status-ui ./cmd/status-ui
+FROM oven/bun:1-alpine AS deps
+WORKDIR /app
+COPY package.json bun.lock* ./
+RUN bun install --frozen-lockfile 2>/dev/null || bun install
 
-# ---- runtime stage ----
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata \
-    && addgroup -S app && adduser -S -G app -u 10001 app
-COPY --from=build /out/zen-proxy /usr/local/bin/zen-proxy
-COPY --from=build /out/status-ui /usr/local/bin/status-ui
-USER app
+FROM deps AS runtime
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json tsconfig.json ./
+COPY src ./src
+ENV NODE_ENV=production
 EXPOSE 8080
 EXPOSE 8090
-ENTRYPOINT ["/usr/local/bin/zen-proxy"]
+CMD ["bun", "run", "src/cmd/zenproxy.ts"]

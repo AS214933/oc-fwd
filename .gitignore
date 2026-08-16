@@ -3,3 +3,6 @@ zenproxy
 .env
 *.log
 coverage.out
+node_modules/
+dist/
+.bun

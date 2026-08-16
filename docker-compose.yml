@@ -19,7 +19,7 @@ services:
     image: ghcr.io/${GHCR_OWNER:-as214933}/${GHCR_IMAGE:-oc-fwd}:latest
     container_name: status-ui
     restart: unless-stopped
-    entrypoint: /usr/local/bin/status-ui
+    entrypoint: ["bun", "run", "src/cmd/status-ui.ts"]
     depends_on:
       - zenproxy
     ports:
