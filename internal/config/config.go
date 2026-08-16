@@ -32,6 +32,8 @@ type Config struct {
 	MaxBodyBytes         int64
 	UpstreamTimeout      time.Duration
 	UpstreamTimeoutSet   bool
+	DialTimeout          time.Duration
+	DNSCacheTTL          time.Duration
 	MaxConcurrency       int
 	IPv6Prefer           bool
 	ForceIPv6            bool
@@ -130,6 +132,8 @@ func Load() (Config, error) {
 		CircuitCooldown:      envSeconds("ZEN_CIRCUIT_COOLDOWN_SECONDS", 30),
 		MaxBodyBytes:         int64(envInt("ZEN_MAX_BODY_MB", 128)) << 20,
 		UpstreamTimeout:      envSeconds("ZEN_UPSTREAM_TIMEOUT_SECONDS", 600),
+		DialTimeout:          envSeconds("ZEN_DIAL_TIMEOUT_SECONDS", 15),
+		DNSCacheTTL:          envSeconds("ZEN_DNS_CACHE_TTL_SECONDS", 60),
 		MaxConcurrency:       envInt("ZEN_MAX_CONCURRENCY", 0),
 		IPv6Prefer:           envBool("ZEN_IPV6_PREFER", true),
 		ForceIPv6:            envBool("ZEN_FORCE_IPV6", false),
@@ -139,6 +143,12 @@ func Load() (Config, error) {
 	}
 	if cfg.UpstreamTimeout > 0 {
 		cfg.UpstreamTimeoutSet = true
+	}
+	if cfg.DialTimeout <= 0 {
+		return cfg, fmt.Errorf("invalid ZEN_DIAL_TIMEOUT_SECONDS %d: must be > 0", int(cfg.DialTimeout/time.Second))
+	}
+	if cfg.DNSCacheTTL < 0 {
+		return cfg, fmt.Errorf("invalid ZEN_DNS_CACHE_TTL_SECONDS %d: must be >= 0", int(cfg.DNSCacheTTL/time.Second))
 	}
 	var err error
 	cfg.ModelMap, err = parseModelMap(envStr("ZEN_MODEL_MAP", ""))

@@ -65,3 +65,24 @@ func TestLoadInvalidThreshold(t *testing.T) {
 		t.Fatalf("expected threshold error, got %v", err)
 	}
 }
+
+func TestLoadDialDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DialTimeout.Seconds() != 15 {
+		t.Fatalf("DialTimeout = %v, want 15s", cfg.DialTimeout)
+	}
+	if cfg.DNSCacheTTL.Seconds() != 60 {
+		t.Fatalf("DNSCacheTTL = %v, want 60s", cfg.DNSCacheTTL)
+	}
+}
+
+func TestLoadInvalidDialTimeout(t *testing.T) {
+	t.Setenv("ZEN_DIAL_TIMEOUT_SECONDS", "0")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ZEN_DIAL_TIMEOUT_SECONDS") {
+		t.Fatalf("expected dial timeout error, got %v", err)
+	}
+}

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	mrand "math/rand"
+	rand "math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -14,22 +14,17 @@ import (
 // spread across the whole pool instead of following a fixed rotation order.
 type keyRing struct {
 	keys []string
-	mu   sync.Mutex
-	rnd  *mrand.Rand
 }
 
 func newKeyRing(keys []string) *keyRing {
-	return &keyRing{keys: keys, rnd: mrand.New(mrand.NewSource(time.Now().UnixNano()))}
+	return &keyRing{keys: keys}
 }
 
 func (k *keyRing) pick() string {
 	if k == nil || len(k.keys) == 0 {
 		return ""
 	}
-	k.mu.Lock()
-	n := k.rnd.Intn(len(k.keys))
-	k.mu.Unlock()
-	return k.keys[n]
+	return k.keys[rand.IntN(len(k.keys))]
 }
 
 // modelFallback tracks the no-key -> API-key state for one upstream model.
@@ -54,7 +49,7 @@ func (st *modelFallback) state() string {
 // model (say model A) only switches that model to API-key mode, while other
 // models keep going anonymously.
 type fallbackState struct {
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	models map[string]*modelFallback
 }
 
@@ -83,8 +78,8 @@ func (p *Proxy) inKeyMode(model string) bool {
 	if !p.keysEnabled() {
 		return false
 	}
-	p.fb.mu.Lock()
-	defer p.fb.mu.Unlock()
+	p.fb.mu.RLock()
+	defer p.fb.mu.RUnlock()
 	st := p.fb.models[model]
 	return st != nil && st.keyMode
 }
@@ -94,8 +89,8 @@ func (p *Proxy) keyedModels() []string {
 	if !p.keysEnabled() {
 		return nil
 	}
-	p.fb.mu.Lock()
-	defer p.fb.mu.Unlock()
+	p.fb.mu.RLock()
+	defer p.fb.mu.RUnlock()
 	var out []string
 	for model, st := range p.fb.models {
 		if st.keyMode {

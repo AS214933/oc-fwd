@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	mrand "math/rand/v2"
 	"net/http"
 	"strconv"
 	"time"
@@ -171,9 +172,7 @@ func (p *Proxy) backoff(attempt int, retryAfter int) (time.Duration, bool) {
 	base := p.cfg.RetryBaseBackoff
 	mult := 1 << uint(math.Min(float64(attempt), 20))
 	d := base * time.Duration(mult)
-	p.rndMu.Lock()
-	jitter := time.Duration(p.rnd.Int63n(int64(p.cfg.RetryBaseBackoff/2) + 1))
-	p.rndMu.Unlock()
+	jitter := time.Duration(mrand.Int64N(int64(p.cfg.RetryBaseBackoff/2) + 1))
 	d += jitter
 	if d > p.cfg.RetryMaxBackoff {
 		d = p.cfg.RetryMaxBackoff

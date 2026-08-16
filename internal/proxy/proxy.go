@@ -4,7 +4,6 @@
 package proxy
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
@@ -13,12 +12,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	mrand "math/rand"
 	"net"
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"zenproxy/internal/circuit"
@@ -33,23 +30,42 @@ type Proxy struct {
 	client   *http.Client
 	circuit  *circuit.Circuit
 	sem      chan struct{}
-	rnd      *mrand.Rand
-	rndMu    sync.Mutex
+	dns      *dnsCache
 	keys     *keyRing
 	fb       fallbackState
 	reporter *reporter
 }
 
 func New(cfg config.Config, log *slog.Logger) (*Proxy, error) {
+	dialTimeout := cfg.DialTimeout
+	if dialTimeout <= 0 {
+		dialTimeout = socks5DialDefault
+	}
 	tr := &http.Transport{
 		MaxIdleConns:          2000,
 		MaxIdleConnsPerHost:   512,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		TLSHandshakeTimeout:   dialTimeout,
 		ExpectContinueTimeout: time.Second,
 		ForceAttemptHTTP2:     true,
 		// No total ResponseHeaderTimeout: prefill for very long prompts can
 		// take minutes and streaming responses stay open for a long time.
+	}
+	// TLS session resumption is safe with IP rotation: tickets are tied to
+	// the upstream server, not to the client's exit IP, so a fresh SOCKS5 +
+	// TCP connection still skips the full TLS handshake (1 RTT instead of 2+).
+	// This does NOT reuse the SOCKS5 connection itself.
+	tr.TLSClientConfig = &tls.Config{
+		ClientSessionCache: tls.NewLRUClientSessionCache(128),
+	}
+	p := &Proxy{
+		cfg:     cfg,
+		log:     log,
+		circuit: circuit.New(cfg.CircuitFailures, cfg.CircuitCooldown),
+		fb:      fallbackState{models: map[string]*modelFallback{}},
+	}
+	if cfg.IPv6Prefer || cfg.ForceIPv6 {
+		p.dns = newDNSCache(cfg.DNSCacheTTL, nil)
 	}
 	if cfg.RotateIP {
 		// Every request gets a fresh TCP connection through the socks5 proxy
@@ -63,31 +79,22 @@ func New(cfg config.Config, log *slog.Logger) (*Proxy, error) {
 		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	}
 	if cfg.Socks5 != "" {
-		dialer, err := newSocks5Dialer(cfg.Socks5)
+		dialer, err := newSocks5Dialer(cfg.Socks5, dialTimeout)
 		if err != nil {
 			return nil, err
 		}
-		tr.DialContext = makeDialContext(cfg, log, func(ctx context.Context, network, address string) (net.Conn, error) {
-			return dialer.Dial(network, address)
-		})
+		tr.DialContext = makeDialContext(cfg, log, dialer.DialContext, p.dns)
 	} else {
-		nd := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-		tr.DialContext = makeDialContext(cfg, log, nd.DialContext)
+		nd := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
+		tr.DialContext = makeDialContext(cfg, log, nd.DialContext, p.dns)
 	}
 	client := &http.Client{Transport: tr} // per-request timeout applied in doUpstream
 	var sem chan struct{}
 	if cfg.MaxConcurrency > 0 {
 		sem = make(chan struct{}, cfg.MaxConcurrency)
 	}
-	p := &Proxy{
-		cfg:     cfg,
-		log:     log,
-		client:  client,
-		circuit: circuit.New(cfg.CircuitFailures, cfg.CircuitCooldown),
-		sem:     sem,
-		rnd:     mrand.New(mrand.NewSource(time.Now().UnixNano())),
-		fb:      fallbackState{models: map[string]*modelFallback{}},
-	}
+	p.client = client
+	p.sem = sem
 	if len(cfg.APIKeys) > 0 {
 		p.keys = newKeyRing(cfg.APIKeys)
 		go p.probeLoop()
@@ -201,11 +208,11 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleDebugModes(w http.ResponseWriter, r *http.Request) {
 	states := map[string]string{}
 	if p.keysEnabled() {
-		p.fb.mu.Lock()
+		p.fb.mu.RLock()
 		for model, st := range p.fb.models {
 			states[model] = st.state()
 		}
-		p.fb.mu.Unlock()
+		p.fb.mu.RUnlock()
 	}
 	for _, m := range p.cfg.Models {
 		if _, ok := states[m]; !ok {

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -147,5 +148,30 @@ func TestConcurrent429BothModesBoundedRetries(t *testing.T) {
 	maxAttempts := n * (cfg.RetryMax + 1) * 2
 	if errs := ts.errCount(); errs > maxAttempts {
 		t.Fatalf("upstream hit too many times: errs=%d (> %d): request loop did not terminate", errs, maxAttempts)
+	}
+}
+
+// Under high concurrency the rotate-ip path must still open a fresh SOCKS5
+// connection per request: same exit-IP rotation guarantee, no pooled reuse.
+func TestConcurrentRotateIPFreshConnectionPerRequest(t *testing.T) {
+	socks := newMinimalSocks5Server(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.Socks5 = "socks5://" + socks.addr()
+	cfg.RotateIP = true
+	p := newTestProxy(t, cfg)
+
+	const n = 40
+	codes := fireConcurrent(t, p, n)
+	if ok := countStatus(codes, http.StatusOK); ok != n {
+		t.Fatalf("want %d OK, got %d: %v", n, ok, codes)
+	}
+	if got := socks.handshakes.Load(); got < n {
+		t.Fatalf("expected >= %d fresh SOCKS5 connections under concurrency, got %d", n, got)
 	}
 }
