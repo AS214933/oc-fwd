@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zen Proxy 状态</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div>
+        <h1>Zen Proxy 状态</h1>
+        <p class="sub">反向代理健康检查 · 匿名 / API Key 双模式探测</p>
+      </div>
+    </div>
+    <div class="meta">
+      <span id="lastCheck" class="muted">等待首次检测…</span>
+      <span id="interval" class="muted"></span>
+    </div>
+  </header>
+
+  <main>
+    <section id="banner" class="banner unknown" role="status">
+      <div class="banner-dot" aria-hidden="true"></div>
+      <div>
+        <h2 id="bannerTitle">检测中…</h2>
+        <p id="bannerSub">正在等待第一轮探测结果</p>
+      </div>
+    </section>
+
+    <section class="legend">
+      <span><i class="swatch green" aria-hidden="true"></i>绿色：匿名调用成功</span>
+      <span><i class="swatch blue" aria-hidden="true"></i>蓝色：仅 API Key 调用成功</span>
+      <span><i class="swatch red" aria-hidden="true"></i>红色：全部调用失败</span>
+    </section>
+
+    <section id="models" class="grid">
+      <div class="empty muted">没有可监控的模型（配置 STATUS_MODELS，或确保代理 /v1/models 可用）</div>
+    </section>
+
+    <section id="incidentsWrap" class="panel hidden">
+      <h3>事件记录</h3>
+      <ul id="incidents" class="incidents"></ul>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p class="muted">状态 UI 独立于反代后端运行，仅通过 HTTP 探测代理与上游。</p>
+  </footer>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

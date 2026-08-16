@@ -2,13 +2,12 @@
 
 一个简单、高并发的 [opencode ai zen](https://opencode.ai/zen) 反向代理，使用 Go 编写。
 
-- 对外暴露 **OpenAI 兼容** 接口（`/v1/chat/completions`，支持 SSE 流式；另含 `/v1/responses`、`/v1/models`、`/healthz`）
-- 调用上游时可以**不带 key**（匿名调用 zen free），也可以指定 key（`ZEN_UPSTREAM_API_KEY`）
-- 别人调用本反代时鉴权**可选**（`ZEN_AUTH_KEY`，留空即免鉴权）
-- 可**指定反代的模型**（白名单）以及**别名映射**（alias -> 上游模型）
-- 支持**socks5 代理**（socks5h 语义，域名由代理解析）
-- 内置 **429 自动屏蔽 + 重试**：指数退避 + 抖动 + Retry-After 优先，连续 429 触发熔断，冷却期内不再请求上游，保护上游配额
-- 高负载友好：Go 原生并发、连接池调优、可选并发上限、优雅退出、请求级日志
+- 对外暴露 **OpenAI 兼容**接口：`/v1/chat/completions`（支持 SSE 流式）、`/v1/responses`、`/v1/messages`、`/v1/models`、`/healthz`
+- 调用上游可**匿名**（zen free）或带 key（`ZEN_UPSTREAM_API_KEY`），caller 鉴权可选（`ZEN_AUTH_KEY`）
+- 支持模型白名单与别名映射（`ZEN_MODELS` / `ZEN_MODEL_MAP`）
+- 支持 **socks5** 代理，默认 **IPv6 优先**（可强制只走 IPv6）
+- 内置 **429 自动重试 + 熔断**（退避 + 抖动 + Retry-After），可选「匿名失败自动回退 API key」
+- 附赠独立的 **Status UI** 状态页（绿=匿名成功 / 蓝=仅 key 成功 / 红=全部失败）
 
 ## 快速开始
 
@@ -16,8 +15,7 @@
 
 ```bash
 cp .env.example .env
-# 按需编辑 .env
-docker compose up -d --build
+docker compose up -d --build   # 反代 :8080 + Status UI :8090
 ```
 
 ### 直接运行
@@ -30,16 +28,12 @@ ZEN_MODELS=deepseek-v4-flash-free ./zen-proxy
 ## 项目结构
 
 ```text
-cmd/zenproxy/            # 入口：加载配置、启动 HTTP 服务
+cmd/zenproxy/            # 反代入口
+cmd/status-ui/           # Status UI 入口（独立进程 / 端口，嵌入静态前端）
+status/                  # Status UI：配置、探测检查器、HTTP 服务与前端资源
 internal/config/         # 配置与环境变量解析
 internal/circuit/        # 429 熔断器
-internal/proxy/          # 代理核心
-  ├── proxy.go           #   Proxy 结构、构造、路由、鉴权、日志中间件
-  ├── handler.go         #   /v1/chat|responses|messages 请求处理
-  ├── dial.go            #   socks5 + IPv6 优先/强制拨号、/debug/upstream-ip
-  ├── convert.go         #   统一转 Chat Completions（responses/messages）
-  ├── upstream.go        #   上游请求、429 重试/退避
-  └── stream.go          #   SSE 流式转发与 model 改写
+internal/proxy/          # 代理核心（proxy/handler/dial/convert/upstream/stream）
 ```
 
 ## 环境变量
@@ -50,16 +44,16 @@ internal/proxy/          # 代理核心
 | `ZEN_UPSTREAM` | `https://opencode.ai/zen/v1` | 上游网关（OpenAI 兼容） |
 | `ZEN_UPSTREAM_API_KEY` | 空 | 调用上游的 key；留空 = 匿名调用 zen free |
 | `ZEN_SOCKS5` | 空 | socks5 代理，如 `socks5://user:pass@host:port` |
-| `ZEN_IPV6_PREFER` | `true` | 域名本地解析、IPv6 优先，失败回退 IPv4；`false` = 主机名透传给代理解析 |
-| `ZEN_FORCE_IPV6` | `false` | `true` = 强制只走 IPv6，绝不回退 IPv4；目标无 AAAA / 拨号失败直接报错（详见下文） |
-| `ZEN_ROTATE_IP` | `true` | 每请求新建一条到上游的 TCP 连接（禁用连接池）；`false` = 复用连接（更快，节省握手开销） |
-| `ZEN_API_KEYS_FILE` | 空 | API key 文件（一行一个）；配置后启用“匿名失败自动回退带 key 请求”（按模型独立、key 随机抽取） |
-| `ZEN_NO_KEY_FAIL_THRESHOLD` | `3` | 匿名请求 429 连续失败多少次后切换到 API key（5xx 不按阈值：重试耗尽即回退） |
-| `ZEN_NO_KEY_PROBE_SECONDS` | `3` | 回退期间每多少秒探测一次匿名请求是否恢复 |
-| `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | `true` = 全部请求统一转成 Chat Completions 转发（详见下文） |
+| `ZEN_IPV6_PREFER` | `true` | 本地解析域名、IPv6 优先、失败回退 IPv4；`false` = 主机名透传给代理解析 |
+| `ZEN_FORCE_IPV6` | `false` | 强制只走 IPv6，绝不回退 IPv4 |
+| `ZEN_ROTATE_IP` | `true` | 每请求新建上游连接（配合 socks5 随机出口）；`false` = 复用连接 |
+| `ZEN_API_KEYS_FILE` | 空 | key 文件（一行一个）；启用「匿名失败自动回退 key」 |
+| `ZEN_NO_KEY_FAIL_THRESHOLD` | `3` | 匿名 429 连续失败多少次后切 key（5xx 重试耗尽即切） |
+| `ZEN_NO_KEY_PROBE_SECONDS` | `3` | 回退期间探测匿名恢复的间隔 |
+| `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | 所有请求统一转成 Chat Completions 转发 |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
-| `ZEN_AUTH_KEY` | 空 | 调用本反代所需的 key；留空 = 免鉴权 |
+| `ZEN_AUTH_KEY` | 空 | 调用本反代需带的 key；留空 = 免鉴权 |
 | `ZEN_RETRY_MAX` | `3` | 429 最大重试次数 |
 | `ZEN_RETRY_BACKOFF_SECONDS` | `2` | 退避基数（指数增长 + 抖动） |
 | `ZEN_RETRY_MAX_BACKOFF_SECONDS` | `30` | 退避上限（同时封顶 Retry-After） |
@@ -73,86 +67,99 @@ internal/proxy/          # 代理核心
 ## 调用示例
 
 ```bash
-# 非流式
+# 非流式 / 流式
 curl http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <ZEN_AUTH_KEY 若配置>' \
   -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}]}'
 
-# 流式
-curl -N http://localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
+curl -N http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}],"stream":true}'
 
-# 模型列表
+# 模型列表 / 上游 IP 诊断
 curl http://localhost:8080/v1/models
-
-# 诊断：查询代理连上游会用的 IP 与地址族（IPv4/IPv6）
 curl http://localhost:8080/debug/upstream-ip
-# => {"upstream":"https://opencode.ai/zen/v1","socks5":true,"ipv6_prefer":true,"ip":"2606:4700:78::90:0:140","family":"ipv6"}
+# => {"socks5":true,"ipv6_prefer":true,"ip":"2606:4700:78::90:0:140","family":"ipv6"}
 ```
 
 接入 opencode / 任意 OpenAI 兼容客户端时，把 baseURL 指向 `http://<host>:8080/v1` 即可。
 
 ## 429 自动屏蔽重试
 
-- 上游返回 `429` 时：优先按 `Retry-After` 等待，否则指数退避 + 随机抖动，最多重试 `ZEN_RETRY_MAX` 次；
-- 连续 `ZEN_CIRCUIT_FAILURES` 次 429 后熔断打开：冷却期内直接返回 `429`（不再打上游），冷却结束自动半开重试；
-- 重试耗尽后返回 `429`，错误体为 OpenAI 格式。
+- 429 优先按 `Retry-After` 等待，否则指数退避 + 抖动，最多重试 `ZEN_RETRY_MAX` 次；
+- 连续 `ZEN_CIRCUIT_FAILURES` 次 429 后熔断：冷却期内直接返回 429，冷却结束半开重试；
+- 重试耗尽返回 OpenAI 格式的 429 错误体。
 
 ## 强制统一为 Chat Completions 转发
 
-设置 `ZEN_FORCE_CHAT_COMPLETIONS=true` 后，所有进来的请求都会以 **Chat Completions 格式**转发到上游 `/v1/chat/completions`：
+`ZEN_FORCE_CHAT_COMPLETIONS=true` 时，所有请求统一转成 Chat Completions 转发到上游 `/v1/chat/completions`：
 
-- `POST /v1/chat/completions`：原样透传（不检查模型白名单/不做别名改写）；
-- `POST /v1/responses`：自动转换为 Chat Completions（`instructions` → system 消息，`input` → user/assistant 消息，`max_output_tokens` → `max_tokens`，function tools 转换后透传）；**响应再转回 Responses API 格式**返回给客户端：非流式返回 `response` 对象（`output` 含 message / function_call 输出项），流式输出标准 Responses SSE 事件（`response.created` / `response.output_text.delta` / `response.function_call_arguments.delta` / `response.completed` 等），因此 codex、opencode 等用 `/v1/responses` 的客户端可以正常解析；
-- 工具调用双向转换：`function_call` → 带 `tool_calls` 的 assistant 消息、`function_call_output` → `role=tool` 消息，`call_id` 原样保留（上游 `tool_calls` 的 id 即为客户端 `call_id`）；
-- `POST /v1/messages`（Anthropic）：`system`/`messages`/`tools`/`max_tokens` 转换为 Chat Completions 等价字段；
-- 图片等非文本 content 会在转换时忽略（当前为纯文本转换）。
+- `/v1/chat/completions`：原样透传（不查白名单 / 不改写）；
+- `/v1/responses`：请求转 Chat Completions（`instructions`→system、`input`→user/assistant、`max_output_tokens`→`max_tokens`、tools 转换），**响应再转回 Responses 格式**（非流式 `response` 对象，流式 `response.created` / `response.output_text.delta` / `response.completed` 等事件），codex / opencode 等 `/v1/responses` 客户端可正常解析；
+- 工具调用双向转换：`function_call` → `tool_calls` assistant 消息、`function_call_output` → `role=tool`，`call_id` 原样保留；
+- `/v1/messages`（Anthropic）：`system` / `messages` / `tools` / `max_tokens` 转换后转发；
+- 图片等非文本 content 目前会被忽略（纯文本转换）。
 
-`false`（默认）时各端点按原生格式转发：`/v1/responses → /responses`、`/v1/messages → /messages`，此时模型白名单/别名检查对三个端点都生效。
+`false`（默认）时各端点按原生格式转发（`/v1/responses → /responses`、`/v1/messages → /messages`），模型白名单 / 别名对三个端点均生效。
 
-## 怎么判断是不是 IPv6
+## socks5 与 IPv6
 
-1. **`GET /debug/upstream-ip`**（已内置）：返回上游解析后实际拨号的 `ip` 与 `family`（`ipv6`/`ipv4`），走的是与真实请求相同的 socks5 + IPv6 优先拨号路径；
-2. **debug 日志**：`LOG_LEVEL=debug` 时每次新拨号打印 `dialed upstream host=... ip=[2606:...]:443`，带方括号+冒号即 IPv6；
-3. **外部对照**：`getent ahosts opencode.ai`（看 AAAA 记录），或 `curl -6 -x socks5h://user:pass@host:port https://api6.ipify.org`（经代理的 IPv6 出口 IP）。
-
-## IPv6 优先说明
-
-`ZEN_IPV6_PREFER=true`（默认）时：上游域名由本代理本地 DNS 解析，优先使用 AAAA（IPv6）地址连接，IPv6 失败自动回退 IPv4——配合支持 IPv6 出口的 socks5 代理使用。设为 `false` 则恢复纯 socks5h 行为（主机名直接交给代理解析，不本地解析）。
-
-`ZEN_FORCE_IPV6=true` 时进一步收紧：只要有 AAAA 记录就只尝试 IPv6，IPv6 拨号失败**不会**回退 IPv4（目标只有 IPv4 或 DNS 失败时直接报错）。适合确认上游确实经由 socks5 的 IPv6 出口出网、排查“以为走了 IPv6 其实回退了 IPv4”的情况。`/debug/upstream-ip` 会同时返回 `ipv6_prefer` 与 `ipv6_force` 两个字段。
-
-判断每次连接是否真的走了 socks5 + IPv6：开启 `LOG_LEVEL=debug` 后每次上游拨号都会打印
-`dialed upstream ... ip=[2606:...]:443 family=ipv6`，带方括号+冒号的即 IPv6；也可用 `/debug/upstream-ip` 直接看 `family` 字段。
-
-## 429 与连接复用说明
-
-上游返回 `429` 时的处理完全由本代理的重试/熔断策略负责（见上文「429 自动屏蔽重试」），代理不会、也无法通过更换出口 IP 等方式规避上游限流。
-
-`ZEN_ROTATE_IP=true`（默认）只是让每个请求都新建一条到上游的 TCP 连接（禁用 keep-alive、强制 HTTP/1.1），避免请求长时间复用同一条连接。这与 429 没有必然关系；是否需要注意连接复用，取决于你使用的上游与实际网络出口的具体策略。
-
-代价是每次请求都要重新 TCP+TLS 握手，单请求延迟略增；追求吞吐可设 `false` 复用连接。
+- 默认（`ZEN_IPV6_PREFER=true`）：本地 DNS 解析上游域名，IPv6（AAAA）优先，失败回退 IPv4；设 `false` 恢复纯 socks5h（主机名交给代理解析）。
+- `ZEN_FORCE_IPV6=true`：有 AAAA 就只走 IPv6、绝不回退 IPv4，用于确认确实经由 socks5 的 IPv6 出口。
+- `ZEN_ROTATE_IP=true`（默认）：每请求新建一条上游连接并禁用复用 / HTTP/2，配合支持随机 IPv6 出口的 socks5 使用；追求吞吐可设 `false` 复用连接。429 的处理只由本代理的重试 / 熔断负责，不会靠换出口 IP 规避限流。
+- 判断每次连接是否真的走了 IPv6：
+  1. `GET /debug/upstream-ip` 返回实际拨号的 `ip` 与 `family`（`ipv6` / `ipv4`），走与真实请求相同的拨号路径；
+  2. `LOG_LEVEL=debug` 时每次拨号打印 `dialed upstream host=... ip=[2606:...]:443 family=ipv6`，带方括号 + 冒号即 IPv6。
 
 ## 匿名失败自动回退 API Key
 
-设置 `ZEN_API_KEYS_FILE=/path/to/keys`（文件里一行一个 key，`#` 开头为注释）后启用：
+配置 `ZEN_API_KEYS_FILE`（文件一行一个 key，`#` 开头为注释）后启用，按上游模型独立工作：
 
-1. **默认匿名**请求（不带 key，例如 zen free）；
-2. **每个模型独立回退**：只有出问题的那个模型切换到 API key 模式，其他模型继续匿名调用——例如模型 A 被限流时只有 A 改走 key，模型 B 不受影响；
-3. **429/网络错误按阈值回退**：匿名请求**连续失败** `ZEN_NO_KEY_FAIL_THRESHOLD` 次（默认 3）后切换，触发切换的**那个请求会在同一次请求内用 key 自动重试**，用户端不会收到错误，只感知到变慢；切换发生那一刻仍在匿名重试的**并发请求**同样会用 key 透明重试同一次请求，不会把 429 漏给用户；
-4. **5xx（如 503）重试后立即回退**：和 4xx 一样先按 `ZEN_RETRY_MAX`（默认 3 次）退避重试，重试耗尽后该模型立即切换到 key 模式，并在**同一次请求内用 key 重试**——5xx 不会返回给用户，只有当带 key 的重试也失败时才把错误返回（高并发下由其他请求触发的切换同样生效）；
-5. 带 key 的请求每次从 key 文件里**随机抽一个** key 使用（均匀随机，避免固定轮换导致单个 key 被打满）；
-6. 回退期间每 `ZEN_NO_KEY_PROBE_SECONDS` 秒（默认 3）对**每个处于回退中的模型**发一次**无 key 探测请求**；该模型匿名恢复（返回 2xx）就单独切回匿名模式，其余模型保持 key 模式；
-7. 所有请求（包括探测与带 key 的请求）都走配置的 socks5 代理（若 `ZEN_SOCKS5` 已设置）。
-5. 带 key 的请求每次从 key 文件里**随机抽一个** key 使用（均匀随机，避免固定轮换导致单个 key 被打满）；
-6. 回退期间每 `ZEN_NO_KEY_PROBE_SECONDS` 秒（默认 3）对**每个处于回退中的模型**发一次**无 key 探测请求**；该模型匿名恢复（返回 2xx）就单独切回匿名模式，其余模型保持 key 模式；
-7. 所有请求（包括探测与带 key 的请求）都走配置的 socks5 代理（若 `ZEN_SOCKS5` 已设置）。
+1. 默认匿名调用；匿名 429 / 网络错误连续 `ZEN_NO_KEY_FAIL_THRESHOLD` 次后该模型切 key，5xx 重试耗尽立即切 key——触发切换的请求会在同一次请求内用 key 透明重试（并发在途请求同样会被兜底），不会把 429 / 5xx 漏给用户；
+2. 带 key 请求从 key 文件**随机抽一个** key（均匀随机，避免固定轮换打满单个 key）；
+3. 回退期间每 `ZEN_NO_KEY_PROBE_SECONDS` 秒对该模型发无 key 探测，恢复（2xx）即单独切回匿名；
+4. 每个请求最多做一轮透明 key 重试，带 key 仍失败即返回错误，不无限重试；熔断打开也计为匿名失败，切模式时熔断计数清零。
 
-回退状态按**实际发给上游的模型**区分（`ZEN_MODEL_MAP` 别名会先解析为上游模型 id），不同模型互不影响；高并发风暴下每个请求最多做一轮透明的 key 重试，带 key 仍失败即返回错误，不会无限重试。
+## 状态页 Status UI
 
-熔断器与回退联动：熔断打开时也会计入匿名失败，确保持续 429 时仍能触发回退；切换模式时熔断计数清零，新模式重新累计。
+独立的 Status UI 进程（默认 `:8090`），与反代后端隔离，只通过 HTTP 探测：
+
+- 每轮对每个模型做**匿名探测**（无 key，经反代）与 **API Key 探测**（带 key，直连上游）；
+- **绿色** = 匿名调用成功；**蓝色** = 匿名失败但带 key 成功（降级）；**红色** = 全部失败；
+- 页面展示每个模型的探测延迟、匿名成功率、最近 60 轮历史条与状态切换事件。
+
+> 为什么 key 探测直连上游：反代自身有「匿名失败自动回退 key」逻辑，从外部看不出匿名是否真的挂了；直连上游才能区分「匿名故障但 key 可用」（蓝）与「彻底故障」（红）。蓝色表示降级，反代可能已用 key 透明兜底，用户未必报错。
+
+### 运行
+
+```bash
+# 本机直接运行（默认监听 :8090）
+STATUS_PROXY=http://127.0.0.1:8080 \
+STATUS_API_KEY=<你的 API key> \
+STATUS_MODELS=deepseek-v4-flash-free \
+go run ./cmd/status-ui
+```
+
+Docker Compose 已内置 `status-ui` 服务（`http://<host>:8090`），在 `.env` 配置 `STATUS_*` 即可。
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `STATUS_LISTEN_ADDR` | `:8090` | 监听地址 |
+| `STATUS_PROXY` | `http://127.0.0.1:8080` | 反代基础地址（匿名探测与模型发现） |
+| `STATUS_UPSTREAM` | `https://opencode.ai/zen` | 上游基础地址（API Key 探测直连，探测路径 `{STATUS_UPSTREAM}/v1/chat/completions`） |
+| `STATUS_API_KEY` | 空 | API Key 探测用的 key；留空 = 不做 key 探测（只出现绿 / 红两态） |
+| `STATUS_PROXY_AUTH` | 空 | 反代若配了 `ZEN_AUTH_KEY`，填同一个值让探测通过鉴权 |
+| `STATUS_MODELS` | 空 | 要监控的模型，逗号分隔；留空 = 从反代 `/v1/models` 自动发现 |
+| `STATUS_INTERVAL` | `15` | 探测间隔（秒） |
+| `STATUS_TIMEOUT` | `30` | 单次探测超时（秒） |
+| `STATUS_HISTORY` | `120` | 每模型保留的历史轮数 |
+
+### HTTP 接口
+
+- `GET /`：状态页（零依赖原生 HTML / CSS / JS）
+- `GET /api/status`：JSON 快照（总状态、每模型探测结果、历史条、事件记录），前端每 5 秒轮询
 
 ## 构建与测试
 
@@ -164,10 +171,7 @@ docker build -t zen-proxy .
 
 ## GHCR 自动构建推送
 
-`.github/workflows/docker-publish.yml` 会在推送到 `main`（打 `latest`）、推送 `v*` 标签（`{{version}}` 等）以及手动触发时，
-用 Buildx 构建 `linux/amd64,linux/arm64` 双架构镜像并推送到 `ghcr.io/<owner>/<repo>`，带 GHA 缓存。
-
-推送 tag 示例：
+推送到 `main` 自动构建 `latest`，推送 `v*` 标签构建对应版本，手动触发亦可；Buildx 构建 `linux/amd64,linux/arm64` 双架构镜像并推送到 `ghcr.io/<owner>/<repo>`。
 
 ```bash
 git tag v0.1.0

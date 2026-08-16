@@ -9,12 +9,16 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/zen-proxy ./cmd/zenproxy
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/status-ui ./cmd/status-ui
 
 # ---- runtime stage ----
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S app && adduser -S -G app -u 10001 app
 COPY --from=build /out/zen-proxy /usr/local/bin/zen-proxy
+COPY --from=build /out/status-ui /usr/local/bin/status-ui
 USER app
 EXPOSE 8080
+EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/zen-proxy"]
