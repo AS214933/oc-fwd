@@ -1,6 +1,7 @@
-// Command status-ui runs the standalone zen-proxy status UI: a small HTTP
-// server that periodically probes the proxy (anonymous) and the upstream
-// (API key) and serves a status.deepseek.com-style frontend.
+// Command status-ui runs the standalone zen-proxy status UI: it receives
+// model state-change reports pushed by the proxy (POST /api/events),
+// reconciles with the proxy's /debug/modes endpoint, and serves a status
+// page showing the anonymous/keyed/keyed_failed switching per model.
 package main
 
 import (
@@ -49,10 +50,7 @@ func main() {
 	log.Info("status UI listening",
 		"addr", cfg.ListenAddr,
 		"proxy", cfg.Proxy,
-		"upstream", cfg.Upstream,
-		"keyed_probes", cfg.APIKey != "",
-		"models", cfg.Models,
-		"interval_s", cfg.Interval/time.Second,
+		"reconcile_interval_s", cfg.Interval/time.Second,
 	)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("server exited", "error", err)

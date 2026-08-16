@@ -8,9 +8,12 @@ services:
       - "${LISTEN_PORT:-8080}:8080"
     env_file:
       - .env
+    environment:
+      # 模型切换状态上报到 Status UI（.env 中 ZEN_STATUS_URL 可覆盖）
+      ZEN_STATUS_URL: "${ZEN_STATUS_URL:-http://status-ui:8090}"
 
-  # 独立于反代后端的 Status UI：只通过 HTTP 探测代理与上游。
-  # 绿=匿名调用成功；蓝=仅 API Key 调用成功；红=全部调用失败。
+  # 独立于反代后端的 Status UI：接收反代上报的模型状态切换，并定期校准。
+  # 绿=匿名模式运行中；蓝=已切换 API Key；红=API Key 也失败（全部失败）。
   status-ui:
     image: ghcr.io/${GHCR_OWNER:-your-ghcr-owner}/${GHCR_IMAGE:-zen-proxy}:latest
     container_name: status-ui
@@ -20,10 +23,8 @@ services:
       - "${STATUS_UI_PORT:-8090}:8090"
     environment:
       STATUS_PROXY: http://zenproxy:8080
-      STATUS_UPSTREAM: "${STATUS_UPSTREAM:-https://opencode.ai/zen}"
-      STATUS_API_KEY: "${STATUS_API_KEY:-}"
       STATUS_PROXY_AUTH: "${ZEN_AUTH_KEY:-}"
-      STATUS_MODELS: "${STATUS_MODELS:-}"
+      STATUS_EVENT_TOKEN: "${ZEN_STATUS_TOKEN:-}"
       STATUS_INTERVAL: "${STATUS_INTERVAL:-15}"
     env_file:
       - .env

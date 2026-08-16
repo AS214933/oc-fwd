@@ -1,11 +1,13 @@
 package status
 
 import (
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 //go:embed assets/*
@@ -33,6 +35,20 @@ func NewHandler(c *Checker, log *slog.Logger) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(c.Snapshot())
+	})
+	mux.HandleFunc("POST /api/events", func(w http.ResponseWriter, r *http.Request) {
+		if c.cfg.EventToken != "" &&
+			subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(c.cfg.EventToken)) != 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var ev StateEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		c.Ingest(ev)
+		w.WriteHeader(http.StatusNoContent)
 	})
 	return logMiddleware(log, mux)
 }

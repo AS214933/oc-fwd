@@ -125,6 +125,14 @@ main { max-width: 1080px; margin: 0 auto; padding: 24px 32px 48px; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+.facts { margin: 14px 0 6px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+.facts div { display: flex; justify-content: space-between; gap: 8px; }
+.facts dt { color: var(--muted); font-size: 12px; }
+.facts dd {
+  margin: 0; font-size: 12px; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .uptime { margin-top: 12px; color: var(--muted); font-size: 12px; }
 .bars { display: flex; gap: 2px; margin-top: 6px; height: 14px; }
 .bars i { flex: 1; border-radius: 2px; background: var(--unknown); opacity: .55; }

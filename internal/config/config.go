@@ -21,6 +21,8 @@ type Config struct {
 	APIKeys              []string          // keys loaded from APIKeysFile
 	NoKeyFailThreshold   int               // consecutive no-key failures before fallback
 	NoKeyProbeInterval   time.Duration     // how often to probe no-key recovery
+	StatusURL            string            // base URL of the status UI to report model state changes to
+	StatusToken          string            // shared token the status UI requires on /api/events
 	AuthKey              string            // optional: key callers must present
 	RetryMax             int
 	RetryBaseBackoff     time.Duration
@@ -118,6 +120,8 @@ func Load() (Config, error) {
 		APIKeysFile:          envStr("ZEN_API_KEYS_FILE", ""),
 		NoKeyFailThreshold:   envInt("ZEN_NO_KEY_FAIL_THRESHOLD", 3),
 		NoKeyProbeInterval:   envSeconds("ZEN_NO_KEY_PROBE_SECONDS", 3),
+		StatusURL:            strings.TrimRight(envStr("ZEN_STATUS_URL", ""), "/"),
+		StatusToken:          envStr("ZEN_STATUS_TOKEN", ""),
 		AuthKey:              envStr("ZEN_AUTH_KEY", ""),
 		RetryMax:             envInt("ZEN_RETRY_MAX", 3),
 		RetryBaseBackoff:     envSeconds("ZEN_RETRY_BACKOFF_SECONDS", 2),

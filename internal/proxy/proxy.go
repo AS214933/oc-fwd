@@ -16,6 +16,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,15 +28,16 @@ import (
 var errCircuitOpen = errors.New("upstream rate limit circuit is open")
 
 type Proxy struct {
-	cfg     config.Config
-	log     *slog.Logger
-	client  *http.Client
-	circuit *circuit.Circuit
-	sem     chan struct{}
-	rnd     *mrand.Rand
-	rndMu   sync.Mutex
-	keys    *keyRing
-	fb      fallbackState
+	cfg      config.Config
+	log      *slog.Logger
+	client   *http.Client
+	circuit  *circuit.Circuit
+	sem      chan struct{}
+	rnd      *mrand.Rand
+	rndMu    sync.Mutex
+	keys     *keyRing
+	fb       fallbackState
+	reporter *reporter
 }
 
 func New(cfg config.Config, log *slog.Logger) (*Proxy, error) {
@@ -90,6 +92,11 @@ func New(cfg config.Config, log *slog.Logger) (*Proxy, error) {
 		p.keys = newKeyRing(cfg.APIKeys)
 		go p.probeLoop()
 	}
+	if cfg.StatusURL != "" {
+		p.reporter = newReporter(cfg.StatusURL, cfg.StatusToken)
+		p.reporter.start()
+		p.log.Info("status reporting enabled", "url", cfg.StatusURL)
+	}
 	return p, nil
 }
 
@@ -101,6 +108,7 @@ func (p *Proxy) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", p.requireAuth(p.handleCompletion("messages")))
 	mux.HandleFunc("GET /v1/models", p.requireAuth(p.handleModels))
 	mux.HandleFunc("GET /debug/upstream-ip", p.requireAuth(p.handleDebugUpstreamIP))
+	mux.HandleFunc("GET /debug/modes", p.requireAuth(p.handleDebugModes))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, "ok")
@@ -166,6 +174,41 @@ func (p *Proxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(payload)
+}
+
+// handleDebugModes reports the current anonymous/keyed/keyed_failed state of
+// every configured model. The Status UI polls this endpoint to reconcile its
+// event timeline (e.g. after a restart or a missed webhook event).
+func (p *Proxy) handleDebugModes(w http.ResponseWriter, r *http.Request) {
+	states := map[string]string{}
+	if p.keysEnabled() {
+		p.fb.mu.Lock()
+		for model, st := range p.fb.models {
+			states[model] = st.state()
+		}
+		p.fb.mu.Unlock()
+	}
+	for _, m := range p.cfg.Models {
+		if _, ok := states[m]; !ok {
+			states[m] = stateAnonymous
+		}
+	}
+	for alias := range p.cfg.ModelMap {
+		if _, ok := states[alias]; !ok {
+			states[alias] = stateAnonymous
+		}
+	}
+	models := make([]string, 0, len(states))
+	for m := range states {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+	out := make([]map[string]string, 0, len(models))
+	for _, m := range models {
+		out = append(out, map[string]string{"model": m, "state": states[m]})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"models": out})
 }
 
 func writeError(w http.ResponseWriter, status int, msg, code string) {

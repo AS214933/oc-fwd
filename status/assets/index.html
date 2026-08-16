@@ -12,12 +12,12 @@
       <span class="logo" aria-hidden="true"></span>
       <div>
         <h1>Zen Proxy 状态</h1>
-        <p class="sub">反向代理健康检查 · 匿名 / API Key 双模式探测</p>
+        <p class="sub">模型切换状态 · 每次 匿名 / API Key / 全部失败 切换都会上报</p>
       </div>
     </div>
     <div class="meta">
-      <span id="lastCheck" class="muted">等待首次检测…</span>
-      <span id="interval" class="muted"></span>
+      <span id="lastSync" class="muted">等待数据…</span>
+      <span id="lastEvent" class="muted"></span>
     </div>
   </header>
 
@@ -25,29 +25,29 @@
     <section id="banner" class="banner unknown" role="status">
       <div class="banner-dot" aria-hidden="true"></div>
       <div>
-        <h2 id="bannerTitle">检测中…</h2>
-        <p id="bannerSub">正在等待第一轮探测结果</p>
+        <h2 id="bannerTitle">等待数据…</h2>
+        <p id="bannerSub">正在等待反代上报模型状态</p>
       </div>
     </section>
 
     <section class="legend">
-      <span><i class="swatch green" aria-hidden="true"></i>绿色：匿名调用成功</span>
-      <span><i class="swatch blue" aria-hidden="true"></i>蓝色：仅 API Key 调用成功</span>
-      <span><i class="swatch red" aria-hidden="true"></i>红色：全部调用失败</span>
+      <span><i class="swatch green" aria-hidden="true"></i>绿色：匿名模式运行中</span>
+      <span><i class="swatch blue" aria-hidden="true"></i>蓝色：已切换 API Key（匿名失败）</span>
+      <span><i class="swatch red" aria-hidden="true"></i>红色：API Key 也失败（全部失败）</span>
     </section>
 
     <section id="models" class="grid">
-      <div class="empty muted">没有可监控的模型（配置 STATUS_MODELS，或确保代理 /v1/models 可用）</div>
+      <div class="empty muted">暂无模型状态（等待反代上报或 /debug/modes 可用）</div>
     </section>
 
-    <section id="incidentsWrap" class="panel hidden">
-      <h3>事件记录</h3>
-      <ul id="incidents" class="incidents"></ul>
+    <section id="timelineWrap" class="panel hidden">
+      <h3>切换记录</h3>
+      <ul id="timeline" class="incidents"></ul>
     </section>
   </main>
 
   <footer class="footer">
-    <p class="muted">状态 UI 独立于反代后端运行，仅通过 HTTP 探测代理与上游。</p>
+    <p class="muted">反代（zen-proxy）每次发生模型状态切换会主动上报到本页面，本页面也会定期与 /debug/modes 校准。</p>
   </footer>
   <script src="/assets/app.js"></script>
 </body>

@@ -36,6 +36,18 @@ func (k *keyRing) pick() string {
 type modelFallback struct {
 	keyMode    bool
 	noKeyFails int
+	keyedFail  bool // keyed calls are currently failing
+}
+
+// state returns the effective status-page state of the model.
+func (st *modelFallback) state() string {
+	if st == nil || !st.keyMode {
+		return stateAnonymous
+	}
+	if st.keyedFail {
+		return stateKeyedFail
+	}
+	return stateKeyed
 }
 
 // fallbackState holds fallback state per upstream model: a 429 storm on one
@@ -49,6 +61,21 @@ type fallbackState struct {
 // keysEnabled reports whether the no-key -> API-key fallback is active.
 func (p *Proxy) keysEnabled() bool {
 	return p.keys != nil
+}
+
+// emitStateChange records a model's state transition and reports it to the
+// status UI in the background (a no-op when no URL is configured).
+func (p *Proxy) emitStateChange(model, from, to, reason, detail string) {
+	if p.reporter == nil {
+		return
+	}
+	p.reporter.send(StateEvent{
+		Model:  model,
+		From:   from,
+		To:     to,
+		Reason: reason,
+		Detail: detail,
+	})
 }
 
 // inKeyMode reports whether the given upstream model is currently in keyed mode.
@@ -115,8 +142,11 @@ func (p *Proxy) recordNoKeyFailure(model string) (switched bool) {
 	if st.noKeyFails >= p.cfg.NoKeyFailThreshold {
 		p.log.Info("no-key upstream failing repeatedly, switching model to API-key mode",
 			"model", model, "failures", st.noKeyFails)
+		from := st.state()
 		st.keyMode = true
 		st.noKeyFails = 0
+		p.emitStateChange(model, from, stateKeyed, "anonymous_failures",
+			"anonymous requests failed repeatedly")
 		return true
 	}
 	return false
@@ -141,8 +171,11 @@ func (p *Proxy) forceSwitchToKey(model string) bool {
 		return false
 	}
 	p.log.Info("upstream server error, switching model to API-key mode", "model", model)
+	from := st.state()
 	st.keyMode = true
 	st.noKeyFails = 0
+	p.emitStateChange(model, from, stateKeyed, "server_error",
+		"server error retries exhausted")
 	return true
 }
 
@@ -173,10 +206,43 @@ func (p *Proxy) trySwitchToNoKey(model string) bool {
 		return false
 	}
 	p.log.Info("no-key upstream recovered, switching model back to anonymous mode", "model", model)
+	from := st.state()
 	st.keyMode = false
 	st.noKeyFails = 0
+	st.keyedFail = false
 	p.circuit.Reset()
+	p.emitStateChange(model, from, stateAnonymous, "probe_recovered",
+		"anonymous probe succeeded")
 	return true
+}
+
+// reportKeyedResult tracks whether keyed calls for a model are currently
+// failing and reports keyed_failed <-> keyed transitions to the status UI.
+// Only changes are reported, so a sustained outage yields one down event and
+// the following successful call one recovery event.
+func (p *Proxy) reportKeyedResult(model string, ok bool, detail string) {
+	if !p.keysEnabled() {
+		return
+	}
+	p.fb.mu.Lock()
+	st := p.fb.models[model]
+	if st == nil || !st.keyMode {
+		p.fb.mu.Unlock()
+		return
+	}
+	from, to := "", ""
+	switch {
+	case ok && st.keyedFail:
+		from, to = stateKeyedFail, stateKeyed
+		st.keyedFail = false
+	case !ok && !st.keyedFail:
+		from, to = stateKeyed, stateKeyedFail
+		st.keyedFail = true
+	}
+	p.fb.mu.Unlock()
+	if to != "" {
+		p.emitStateChange(model, from, to, "keyed_error", detail)
+	}
 }
 
 // probeLoop periodically probes every keyed model anonymously (through the

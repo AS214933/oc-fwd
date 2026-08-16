@@ -23,6 +23,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 		if !p.circuit.Allow() {
 			if hasKey {
 				// A keyed attempt hit the open breaker: shielding applies.
+				p.reportKeyedResult(model, false, "circuit open")
 				return nil, errCircuitOpen
 			}
 			// An open breaker can strand anonymous mode (the requests never
@@ -92,6 +93,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 					attempt = -1
 					continue
 				}
+				p.reportKeyedResult(model, false, "network error: "+err.Error())
 				return nil, err
 			}
 			if err := sleepCtx(ctx, wait); err != nil {
@@ -113,6 +115,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 					attempt = -1
 					continue
 				}
+				p.reportKeyedResult(model, false, fmt.Sprintf("429 after retries (retry-after %ds)", ra))
 				return newRateLimitResponse(ra), nil
 			}
 			if err := sleepCtx(ctx, wait); err != nil {
@@ -143,9 +146,11 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 				attempt = -1
 				continue
 			}
+			p.reportKeyedResult(model, false, fmt.Sprintf("HTTP %d after retries", resp.StatusCode))
 		} else {
 			p.circuit.RecordSuccess()
 			p.recordNoKeySuccess(model)
+			p.reportKeyedResult(model, true, "")
 		}
 		resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 		return resp, nil

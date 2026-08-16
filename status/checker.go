@@ -3,109 +3,96 @@ package status
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
 
-// State is the health state of a monitored model.
+// State is the status-page state of a monitored model. It mirrors the state
+// machine in the proxy's fallback logic.
 type State string
 
 const (
-	// StateGreen means the anonymous call through the proxy succeeded.
-	StateGreen State = "green"
-	// StateBlue means the anonymous call failed but an API-key call succeeded.
-	StateBlue State = "blue"
-	// StateRed means every call failed (anonymous and API-key).
-	StateRed State = "red"
-	// StateUnknown is used before the first probe cycle completes.
+	// StateAnonymous means requests go upstream without an API key and succeed.
+	StateAnonymous State = "anonymous"
+	// StateKeyed means anonymous mode is failing, so the proxy switched this
+	// model to API-key calls.
+	StateKeyed State = "keyed"
+	// StateKeyedFail means even the keyed calls are failing.
+	StateKeyedFail State = "keyed_failed"
+	// StateUnknown is reported before any data arrives.
 	StateUnknown State = "unknown"
 )
 
-// Probe is the result of a single probe request.
-type Probe struct {
-	OK        bool   `json:"ok"`
-	Status    int    `json:"status"`
-	LatencyMS int64  `json:"latency_ms"`
-	Error     string `json:"error,omitempty"`
+func validState(s State) bool {
+	switch s {
+	case StateAnonymous, StateKeyed, StateKeyedFail:
+		return true
+	}
+	return false
 }
 
-// ModelStatus is the aggregated status of one model.
-type ModelStatus struct {
-	Model     string `json:"model"`
-	State     State  `json:"state"`
-	Anonymous Probe  `json:"anonymous"`
-	Keyed     Probe  `json:"keyed,omitempty"`
-	CheckedAt int64  `json:"checked_at"`
-}
-
-// Incident records a state transition.
-type Incident struct {
-	Time   int64  `json:"time"`
+// StateEvent is one model state-change reported by the proxy.
+type StateEvent struct {
+	Type   string `json:"type"`
 	Model  string `json:"model"`
-	From   State  `json:"from"`
-	To     State  `json:"to"`
+	From   string `json:"from,omitempty"`
+	To     string `json:"to"`
+	Reason string `json:"reason,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	At     int64  `json:"at"`
+}
+
+// ModelView is the current status of one model.
+type ModelView struct {
+	Model     string     `json:"model"`
+	State     State      `json:"state"`
+	Since     int64      `json:"since"`
+	Switches  int        `json:"switches"`
+	LastEvent StateEvent `json:"last_event"`
 }
 
 // Snapshot is what GET /api/status returns.
 type Snapshot struct {
-	Overall   State              `json:"overall"`
-	CheckedAt int64              `json:"checked_at"`
-	Interval  int                `json:"interval"` // seconds
-	Keyed     bool               `json:"keyed"`    // whether API-key probes are enabled
-	Models    []ModelStatus      `json:"models"`
-	History   map[string][]State `json:"history"`
-	Incidents []Incident         `json:"incidents"`
+	Overall       State        `json:"overall"`
+	LastEventAt   int64        `json:"last_event_at"`
+	LastReconcile int64        `json:"last_reconcile"`
+	Interval      int          `json:"interval"`
+	Models        []ModelView  `json:"models"`
+	Timeline      []StateEvent `json:"timeline"`
 }
 
-// Checker periodically probes the monitored models and keeps the latest
-// state, per-model history and incident list.
+// Checker receives model state-change events from the proxy, keeps the
+// current per-model state plus a timeline of every switch, and periodically
+// reconciles with the proxy's /debug/modes endpoint so restarts or missed
+// webhook deliveries cannot leave the page stale.
 type Checker struct {
 	cfg    Config
 	client *http.Client
-	keyed  bool
 
-	mu        sync.RWMutex
-	models    []string
-	overall   State
-	checkedAt time.Time
-	states    map[string]State
-	anon      map[string]Probe
-	keyedRes  map[string]Probe
-	history   map[string][]State
-	incidents []Incident
+	mu            sync.RWMutex
+	models        map[string]*ModelView
+	timeline      []StateEvent
+	lastReconcile time.Time
 }
 
-// NewChecker builds a checker for the given configuration.
+// NewChecker builds the event collector for the given configuration.
 func NewChecker(cfg Config) *Checker {
 	return &Checker{
 		cfg: cfg,
 		client: &http.Client{
-			Timeout: cfg.Timeout,
-			Transport: &http.Transport{
-				MaxIdleConns:        16,
-				MaxIdleConnsPerHost: 4,
-				IdleConnTimeout:     60 * time.Second,
-			},
+			Timeout:   cfg.Timeout,
+			Transport: &http.Transport{MaxIdleConns: 8, MaxIdleConnsPerHost: 2, IdleConnTimeout: 60 * time.Second},
 		},
-		keyed:    cfg.APIKey != "",
-		states:   map[string]State{},
-		anon:     map[string]Probe{},
-		keyedRes: map[string]Probe{},
-		history:  map[string][]State{},
-		models:   append([]string(nil), cfg.Models...),
+		models: map[string]*ModelView{},
 	}
 }
 
-// Run starts the probe loop. It runs the first cycle immediately, then every
-// cfg.Interval. Run returns when ctx is cancelled.
+// Run starts the reconcile loop. The first reconcile happens immediately,
+// then every cfg.Interval. Run returns when ctx is cancelled.
 func (c *Checker) Run(ctx context.Context) {
-	c.cycle(ctx)
+	c.reconcile(ctx)
 	t := time.NewTicker(c.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -113,248 +100,160 @@ func (c *Checker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			c.cycle(ctx)
+			c.reconcile(ctx)
 		}
 	}
 }
 
-// cycle is one full probe pass.
-func (c *Checker) cycle(ctx context.Context) {
-	models := c.models
-	if len(models) == 0 {
-		models = c.discoverModels(ctx)
-	}
-	if len(models) == 0 {
+// Ingest processes one reported state change.
+func (c *Checker) Ingest(ev StateEvent) {
+	if ev.Type != "" && ev.Type != "state_change" {
 		return
 	}
-
-	previous := c.Snapshot()
-	states := map[string]State{}
-	anon := map[string]Probe{}
-	keyedRes := map[string]Probe{}
-	checkedAt := time.Now()
-
-	for _, model := range models {
-		a := c.probeChat(ctx, c.cfg.Proxy, model, "")
-		anon[model] = a
-		var k Probe
-		if c.keyed {
-			k = c.probeChat(ctx, c.cfg.Upstream, model, c.cfg.APIKey)
-			keyedRes[model] = k
-		}
-		states[model] = combine(a, k, c.keyed)
+	to := State(ev.To)
+	if !validState(to) {
+		return
 	}
-
+	if ev.At == 0 {
+		ev.At = time.Now().UnixMilli()
+	}
 	c.mu.Lock()
-	c.models = mergeModels(c.models, models)
-	c.overall = overallState(states)
-	c.checkedAt = checkedAt
-	c.states = states
-	c.anon = anon
-	c.keyedRes = keyedRes
-	for _, model := range models {
-		st := states[model]
-		c.history[model] = append(c.history[model], st)
-		if n := len(c.history[model]); n > c.cfg.History {
-			c.history[model] = c.history[model][n-c.cfg.History:]
-		}
-		if old := previous.lookup(model); old != StateUnknown && old != st {
-			c.incidents = append(c.incidents, incident(checkedAt, model, old, st, anon[model], keyedRes[model]))
-		}
-	}
-	if n := len(c.incidents); n > 100 {
-		c.incidents = c.incidents[n-100:]
-	}
+	c.applyLocked(ev)
 	c.mu.Unlock()
 }
 
-// probeChat sends one chat completion probe and returns its outcome.
-func (c *Checker) probeChat(ctx context.Context, base, model, key string) Probe {
-	body := fmt.Sprintf(
-		`{"model":%q,"messages":[{"role":"user","content":"ping"}],"max_tokens":1,"stream":false}`,
-		model,
-	)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
-	if err != nil {
-		return Probe{Error: err.Error()}
+// applyLocked applies an event to the internal state; caller holds c.mu.
+func (c *Checker) applyLocked(ev StateEvent) {
+	mv := c.models[ev.Model]
+	if mv == nil {
+		mv = &ModelView{Model: ev.Model}
+		c.models[ev.Model] = mv
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-	} else if c.cfg.ProxyAuth != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.ProxyAuth)
+	to := State(ev.To)
+	if mv.State == to {
+		return // same state: nothing to record
 	}
-
-	start := time.Now()
-	resp, err := c.client.Do(req)
-	latency := time.Since(start).Milliseconds()
-	if err != nil {
-		return Probe{Error: err.Error(), LatencyMS: latency}
+	mv.State = to
+	mv.Since = ev.At
+	if ev.From != "" {
+		mv.Switches++
 	}
-	defer resp.Body.Close()
-	detail := strings.TrimSpace(slurp(resp.Body, 300))
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return Probe{OK: true, Status: resp.StatusCode, LatencyMS: latency}
+	mv.LastEvent = ev
+	c.timeline = append(c.timeline, ev)
+	if n := len(c.timeline); n > c.cfg.History {
+		c.timeline = c.timeline[n-c.cfg.History:]
 	}
-	if detail == "" {
-		detail = http.StatusText(resp.StatusCode)
-	}
-	return Probe{Status: resp.StatusCode, LatencyMS: latency, Error: detail}
 }
 
-// discoverModels lists models from the proxy's GET /v1/models endpoint.
-func (c *Checker) discoverModels(ctx context.Context) []string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.Proxy+"/v1/models", nil)
+// reconcile pulls the current per-model state from the proxy and records any
+// difference as an event, so the page self-heals after a UI restart or a
+// missed webhook.
+func (c *Checker) reconcile(ctx context.Context) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.Proxy+"/debug/modes", nil)
 	if err != nil {
-		return nil
+		return
 	}
 	if c.cfg.ProxyAuth != "" {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.ProxyAuth)
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil
+		c.reconcileWhenUnavailable()
+		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil
+		c.reconcileWhenUnavailable()
+		return
 	}
-	var list struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+	var body struct {
+		Models []struct {
+			Model string `json:"model"`
+			State string `json:"state"`
+		} `json:"models"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
-		return nil
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return
 	}
-	var out []string
-	for _, m := range list.Data {
-		if m.ID != "" {
-			out = append(out, m.ID)
+	now := time.Now()
+	c.mu.Lock()
+	c.lastReconcile = now
+	for _, m := range body.Models {
+		to := State(m.State)
+		if !validState(to) {
+			continue
 		}
+		mv := c.models[m.Model]
+		ev := StateEvent{
+			Type:  "state_change",
+			Model: m.Model,
+			To:    string(to),
+			At:    now.UnixMilli(),
+		}
+		if mv == nil {
+			ev.From = ""
+			ev.Reason = "initial"
+		} else if mv.State != to {
+			ev.From = string(mv.State)
+			ev.Reason = "reconciled"
+		} else {
+			continue
+		}
+		c.applyLocked(ev)
 	}
-	sort.Strings(out)
-	return out
+	c.mu.Unlock()
+}
+
+// reconcileWhenUnavailable keeps the page alive when the proxy is down: the
+// per-model state stays and the page can still show reported events.
+func (c *Checker) reconcileWhenUnavailable() {
+	c.mu.Lock()
+	c.lastReconcile = time.Now()
+	c.mu.Unlock()
 }
 
 // Snapshot returns a copy of the current state for the frontend.
 func (c *Checker) Snapshot() Snapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.snapshotLocked()
-}
-
-func (c *Checker) snapshotLocked() Snapshot {
 	s := Snapshot{
-		Overall:   c.overall,
-		Interval:  int(c.cfg.Interval / time.Second),
-		Keyed:     c.keyed,
-		History:   map[string][]State{},
-		Incidents: append([]Incident(nil), c.incidents...),
+		Interval: int(c.cfg.Interval / time.Second),
+		Models:   []ModelView{},
 	}
-	if c.checkedAt.IsZero() {
+	for _, mv := range c.models {
+		s.Models = append(s.Models, *mv)
+	}
+	sort.Slice(s.Models, func(i, j int) bool { return s.Models[i].Model < s.Models[j].Model })
+	s.Timeline = append([]StateEvent(nil), c.timeline...)
+	if !c.lastReconcile.IsZero() {
+		s.LastReconcile = c.lastReconcile.UnixMilli()
+	}
+	for _, ev := range s.Timeline {
+		if ev.At > s.LastEventAt {
+			s.LastEventAt = ev.At
+		}
+	}
+	switch {
+	case len(s.Models) == 0:
 		s.Overall = StateUnknown
-	} else {
-		s.CheckedAt = c.checkedAt.UnixMilli()
-	}
-	for _, model := range c.models {
-		ms := ModelStatus{
-			Model:     model,
-			State:     c.states[model],
-			Anonymous: c.anon[model],
-			Keyed:     c.keyedRes[model],
-			CheckedAt: s.CheckedAt,
+	default:
+		red, blue := false, false
+		for _, m := range s.Models {
+			switch m.State {
+			case StateKeyedFail:
+				red = true
+			case StateKeyed:
+				blue = true
+			}
 		}
-		if !c.keyed {
-			ms.Keyed = Probe{Error: "STATUS_API_KEY 未配置，跳过 API Key 探测"}
+		switch {
+		case red:
+			s.Overall = "red"
+		case blue:
+			s.Overall = "blue"
+		default:
+			s.Overall = "green"
 		}
-		s.Models = append(s.Models, ms)
-	}
-	for model, states := range c.history {
-		s.History[model] = append([]State(nil), states...)
 	}
 	return s
-}
-
-// lookup returns the previous state of a model from a snapshot. The state is
-// StateUnknown when the model was not part of the previous cycle yet.
-func (s Snapshot) lookup(model string) State {
-	for _, m := range s.Models {
-		if m.Model == model {
-			return m.State
-		}
-	}
-	return StateUnknown
-}
-
-// combine maps the two probe results into the green/blue/red state:
-// green  = the anonymous call through the proxy succeeded,
-// blue   = anonymous failed but the API-key call succeeded,
-// red    = everything failed.
-func combine(anon, keyed Probe, keyedEnabled bool) State {
-	if anon.OK {
-		return StateGreen
-	}
-	if keyedEnabled && keyed.OK {
-		return StateBlue
-	}
-	return StateRed
-}
-
-func overallState(states map[string]State) State {
-	if len(states) == 0 {
-		return StateUnknown
-	}
-	red, blue := false, false
-	for _, st := range states {
-		switch st {
-		case StateRed:
-			red = true
-		case StateBlue:
-			blue = true
-		}
-	}
-	if red {
-		return StateRed
-	}
-	if blue {
-		return StateBlue
-	}
-	return StateGreen
-}
-
-func incident(t time.Time, model string, from, to State, anon, keyed Probe) Incident {
-	detail := "匿名调用失败"
-	if anon.Status > 0 {
-		detail = fmt.Sprintf("匿名调用失败 (HTTP %d)", anon.Status)
-	}
-	if keyed.Status > 0 {
-		detail += fmt.Sprintf("，API Key 探测 (HTTP %d)", keyed.Status)
-	}
-	return Incident{Time: t.UnixMilli(), Model: model, From: from, To: to, Detail: detail}
-}
-
-func mergeModels(existing, fresh []string) []string {
-	set := map[string]bool{}
-	for _, m := range append([]string(nil), existing...) {
-		set[m] = true
-	}
-	var added []string
-	for _, m := range fresh {
-		if !set[m] {
-			set[m] = true
-			added = append(added, m)
-		}
-	}
-	out := append([]string(nil), existing...)
-	out = append(out, added...)
-	sort.Strings(out)
-	return out
-}
-
-func slurp(r io.Reader, n int64) string {
-	lr := &io.LimitedReader{R: r, N: n}
-	b, _ := io.ReadAll(lr)
-	return string(b)
 }
