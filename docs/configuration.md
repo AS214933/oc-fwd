@@ -16,7 +16,7 @@
 | `ZEN_DIAL_TIMEOUT_SECONDS` | `15` | 单次上游拨号超时（含 socks5 握手 / TLS 握手）；用于高并发下快速失败、避免请求堆积 |
 | `ZEN_DNS_CACHE_TTL_SECONDS` | `60` | 本地 DNS 缓存 TTL；`0` = 关闭缓存 |
 | `ZEN_API_KEYS_FILE` | 空 | key 文件（一行一个）；启用「匿名失败自动回退 key」 |
-| `ZEN_NO_KEY_FAIL_THRESHOLD` | `3` | 匿名 429 连续失败多少次后切 key（5xx 重试耗尽即切） |
+| `ZEN_NO_KEY_FAIL_THRESHOLD` | `3` | 匿名 429 连续失败多少次后切 key（任意非 200 重试耗尽即切） |
 | `ZEN_NO_KEY_PROBE_SECONDS` | `3` | 回退期间探测匿名恢复的间隔 |
 | `ZEN_STATUS_URL` | 空 | Status UI 地址；模型状态切换（匿名↔key↔失败）会实时上报到该地址 `/api/events` |
 | `ZEN_STATUS_TOKEN` | 空 | 上报到 Status UI 时携带的 bearer token（与 `STATUS_EVENT_TOKEN` 一致） |

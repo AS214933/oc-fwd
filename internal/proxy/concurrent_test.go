@@ -175,3 +175,29 @@ func TestConcurrentRotateIPFreshConnectionPerRequest(t *testing.T) {
 		t.Fatalf("expected >= %d fresh SOCKS5 connections under concurrency, got %d", n, got)
 	}
 }
+
+func TestConcurrent400StormNoLeakedErrors(t *testing.T) {
+	ts := &authTrackingServer{down: true, downStatus: http.StatusBadRequest}
+	srv := httptest.NewServer(http.HandlerFunc(ts.handler))
+	defer srv.Close()
+
+	cfg := fallbackCfg(t, srv.URL)
+	cfg.NoKeyFailThreshold = 3
+	cfg.RetryMax = 2
+	cfg.RetryBaseBackoff = time.Millisecond
+	cfg.RetryMaxBackoff = 5 * time.Millisecond
+	p := newTestProxy(t, cfg)
+
+	n := 40
+	codes := fireConcurrent(t, p, n)
+
+	if leaked := countStatus(codes, http.StatusBadRequest) + countStatus(codes, http.StatusTooManyRequests) + countStatus(codes, http.StatusBadGateway) + countStatus(codes, http.StatusServiceUnavailable); leaked > 0 {
+		t.Fatalf("%d/%d concurrent requests leaked an error to clients instead of the transparent keyed retry: %v", leaked, n, codes)
+	}
+	if ok := countStatus(codes, http.StatusOK); ok != n {
+		t.Fatalf("want %d OK, got %d: %v", n, ok, codes)
+	}
+	if !p.inKeyMode("m") {
+		t.Fatal("expected proxy to be in keyed mode after the storm")
+	}
+}

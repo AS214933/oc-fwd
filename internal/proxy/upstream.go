@@ -125,13 +125,14 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 			continue
 		}
 
-		if resp.StatusCode >= 500 {
-			// 5xx (e.g. 503) follows the same flow as 4xx: backoff retries
-			// first, and once retries are exhausted the model switches to
-			// API-key mode and the very same request is transparently retried
-			// with a key, so the client never sees the 5xx. Only when the
-			// keyed retry also fails does the response reach the client.
-			p.log.Warn("upstream returned server error", "status", resp.StatusCode)
+		if resp.StatusCode != http.StatusOK {
+			// Every non-200 status (400/401/404/5xx/...) follows the same
+			// fallback flow as 5xx: backoff retries first, and once retries
+			// are exhausted the model switches to API-key mode and the very
+			// same request is transparently retried with a key, so the client
+			// never sees the error. Only when the keyed retry also fails does
+			// the response reach the client.
+			p.log.Warn("upstream returned non-200", "status", resp.StatusCode)
 			wait, ok := p.backoff(attempt, retryAfterSeconds(resp))
 			if ok {
 				resp.Body.Close()

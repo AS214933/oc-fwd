@@ -148,9 +148,10 @@ func (p *Proxy) recordNoKeyFailure(model string) (switched bool) {
 }
 
 // forceSwitchToKey immediately marks the model as keyed so the current
-// request is transparently retried with an API key instead of leaking a 5xx
-// (e.g. 503) to the client. Returns false when no key pool is configured or
-// the model is already keyed (a keyed retry that still errors is surfaced).
+// request is transparently retried with an API key instead of leaking a
+// non-2xx (e.g. 400/503) to the client. Returns false when no key pool is
+// configured or the model is already keyed (a keyed retry that still errors
+// is surfaced).
 func (p *Proxy) forceSwitchToKey(model string) bool {
 	if !p.keysEnabled() {
 		return false
@@ -165,12 +166,12 @@ func (p *Proxy) forceSwitchToKey(model string) bool {
 	if st.keyMode {
 		return false
 	}
-	p.log.Info("upstream server error, switching model to API-key mode", "model", model)
+	p.log.Info("upstream non-2xx, switching model to API-key mode", "model", model)
 	from := st.state()
 	st.keyMode = true
 	st.noKeyFails = 0
-	p.emitStateChange(model, from, stateKeyed, "server_error",
-		"server error retries exhausted")
+	p.emitStateChange(model, from, stateKeyed, "upstream_error",
+		"non-2xx retries exhausted")
 	return true
 }
 

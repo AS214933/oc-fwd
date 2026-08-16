@@ -7,7 +7,7 @@
 - 调用上游可**匿名**（zen free）或带 key（`ZEN_UPSTREAM_API_KEY`），caller 鉴权可选（`ZEN_AUTH_KEY`）
 - 支持模型白名单与别名映射（`ZEN_MODELS` / `ZEN_MODEL_MAP`）
 - 支持 **socks5** 代理，默认 **IPv6 优先**（可强制只走 IPv6）
-- 内置 **429 自动重试 + 熔断**（退避 + 抖动 + Retry-After），可选「匿名失败自动回退 API key」
+- 内置 **429 自动重试 + 熔断**（退避 + 抖动 + Retry-After），上游非 200（400/503 等）一律走重试与「匿名失败自动回退 API key」，错误不会漏给用户
 - 附赠独立的 **Status UI** 状态页：模型每次 匿名 / API Key / 全部失败 切换都会实时上报展示
 
 ## 快速开始

@@ -526,3 +526,64 @@ func TestServerErrorSurfacedWhenKeyedAlsoFails(t *testing.T) {
 		t.Fatalf("expected 2 anonymous + 2 keyed 5xx tries, got %d", errs)
 	}
 }
+
+// TestClientErrorRetriesThenFallsBack verifies a 400 follows the same flow as
+// 5xx: it retries with backoff, and once retries are exhausted the model
+// switches to API-key mode and the very same request is transparently retried
+// with a key, so the client never sees the 400.
+func TestClientErrorRetriesThenFallsBack(t *testing.T) {
+	ts := &authTrackingServer{down: true}
+	ts.setDownStatus(http.StatusBadRequest)
+	srv := httptest.NewServer(http.HandlerFunc(ts.handler))
+	defer srv.Close()
+
+	cfg := fallbackCfg(t, srv.URL)
+	cfg.NoKeyProbeInterval = time.Hour
+	p := newTestProxy(t, cfg)
+
+	rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"m","messages":[]}`, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"content":"ok"`) {
+		t.Fatalf("expected transparent 200 via API key, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !p.inKeyMode("m") {
+		t.Fatal("expected model to be in keyed mode after 400 retry exhaustion")
+	}
+	// baseCfg RetryMax=2 means attempts 0,1,2 hit the upstream anonymously
+	// (3 tries) before the fallback kicks in and retries with a key.
+	if errs := ts.errCount(); errs != 3 {
+		t.Fatalf("expected 3 anonymous 400 tries before falling back, got %d", errs)
+	}
+	auth, _, keyed := ts.snapshot()
+	if auth == "" || !strings.HasPrefix(auth, "Bearer key-") || keyed == 0 {
+		t.Fatalf("expected a keyed retry, auth=%q keyed=%d", auth, keyed)
+	}
+}
+
+// TestClientErrorSurfacedWhenKeyedAlsoFails verifies the client only sees the
+// 400 when the keyed retry fails too.
+func TestClientErrorSurfacedWhenKeyedAlsoFails(t *testing.T) {
+	ts := &authTrackingServer{down: true, errorAll: true}
+	ts.setDownStatus(http.StatusBadRequest)
+	srv := httptest.NewServer(http.HandlerFunc(ts.handler))
+	defer srv.Close()
+
+	cfg := fallbackCfg(t, srv.URL)
+	cfg.RetryMax = 1 // keep backoff quick
+	cfg.NoKeyProbeInterval = time.Hour
+	p := newTestProxy(t, cfg)
+
+	rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"m","messages":[]}`, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when keyed retry also fails, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !p.inKeyMode("m") {
+		t.Fatal("model should be in keyed mode after falling back")
+	}
+	// RetryMax=1: 2 anonymous tries, then 2 keyed tries, then the 400 is
+	// surfaced. The client only sees the failure once the keyed retries fail.
+	if errs := ts.errCount(); errs != 4 {
+		t.Fatalf("expected 2 anonymous + 2 keyed 400 tries, got %d", errs)
+	}
+}

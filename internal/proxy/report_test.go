@@ -140,15 +140,15 @@ func TestServerErrorSwitchEvent(t *testing.T) {
 	cfg.StatusURL = sinkSrv.URL
 	p := newTestProxy(t, cfg)
 
-	// 5xx retries exhaust quickly (RetryMax=2) -> forceSwitchToKey: the very
-	// first request transparently succeeds via the key.
+	// Non-2xx retries exhaust quickly (RetryMax=2) -> forceSwitchToKey: the
+	// very first request transparently succeeds via the key.
 	rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions", `{"model":"m","messages":[]}`, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected transparent keyed success, got %d", rec.Code)
 	}
 	ev := sink.waitFor(t, 1)
-	if ev[0].To != stateKeyed || ev[0].Reason != "server_error" {
-		t.Fatalf("expected server_error switch event, got %+v", ev[0])
+	if ev[0].To != stateKeyed || ev[0].Reason != "upstream_error" {
+		t.Fatalf("expected upstream_error switch event, got %+v", ev[0])
 	}
 }
 
