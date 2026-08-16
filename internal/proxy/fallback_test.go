@@ -58,7 +58,9 @@ func (s *authTrackingServer) handler(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusTooManyRequests
 	}
 	if (auth == "" && down) || errAll {
+		s.mu.Lock()
 		s.errs++
+		s.mu.Unlock()
 		w.WriteHeader(status)
 		io.WriteString(w, `{"error":{"type":"upstream_error"}}`)
 		return

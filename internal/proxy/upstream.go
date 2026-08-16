@@ -15,11 +15,23 @@ import (
 func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream bool) (*http.Response, error) {
 	model := modelFromBody(body)
 	for attempt := 0; ; attempt++ {
+		// hasKey reports whether this attempt cycle is already issued with an
+		// API key. It is tracked per request so that a transparent keyed
+		// retry happens at most once per mode switch: after a keyed attempt
+		// fails, the error is surfaced instead of looping forever.
+		key, hasKey := p.requestKey(model)
 		if !p.circuit.Allow() {
+			if hasKey {
+				// A keyed attempt hit the open breaker: shielding applies.
+				return nil, errCircuitOpen
+			}
 			// An open breaker can strand anonymous mode (the requests never
 			// reach the give-up points below). Count it as a no-key failure
 			// so a persistent 429 storm still trips the API-key fallback.
-			if p.recordNoKeyFailure(model) {
+			if p.recordNoKeyFailure(model) || p.inKeyMode(model) {
+				// Either this call tripped the threshold, or a concurrent
+				// request switched the model while we were retrying
+				// anonymously: restart this very request with a key.
 				p.circuit.Reset()
 				attempt = -1
 				continue
@@ -41,11 +53,29 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "zen-proxy/1.0")
-		if key, ok := p.requestKey(model); ok {
+		if hasKey {
 			req.Header.Set("Authorization", "Bearer "+key)
 		}
 		if stream {
 			req.Header.Set("Accept", "text/event-stream")
+		}
+
+		// retryKeyed restarts the attempt loop with an API key whenever the
+		// model is in keyed mode and this request has not tried a key yet:
+		// - recordNoKeyFailure / forceSwitchToKey returned true -> this request
+		//   just switched the model (429 threshold / 5xx retry-exhaustion)
+		// - inKeyMode -> a concurrent request switched the model while this
+		//   request was still retrying anonymously; without this, all the
+		//   in-flight requests that lost the race leak 429/5xx to clients.
+		retryKeyed := func() bool {
+			if hasKey {
+				return false
+			}
+			if force := p.forceSwitchToKey(model); force || p.inKeyMode(model) {
+				p.circuit.Reset()
+				return true
+			}
+			return false
 		}
 
 		resp, err := p.client.Do(req)
@@ -54,9 +84,11 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 			p.log.Debug("upstream attempt failed", "attempt", attempt, "error", err)
 			wait, ok := p.backoff(attempt, 0)
 			if !ok {
-				if p.recordNoKeyFailure(model) {
-					// Anonymous mode is down and the threshold was reached:
-					// retry this very request with an API key, transparently.
+				if !hasKey && (p.recordNoKeyFailure(model) || p.inKeyMode(model)) {
+					// Anonymous mode is down and the threshold was reached
+					// (here or by a concurrent request): retry with a key.
+					// A keyed attempt that still fails is surfaced, never
+					// restarted, so the loop always terminates.
 					attempt = -1
 					continue
 				}
@@ -76,7 +108,7 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 			wait, ok := p.backoff(attempt, ra)
 			p.log.Warn("upstream returned 429", "attempt", attempt, "retry_after_s", ra, "wait", wait)
 			if !ok {
-				if p.recordNoKeyFailure(model) {
+				if !hasKey && (p.recordNoKeyFailure(model) || p.inKeyMode(model)) {
 					p.circuit.Reset()
 					attempt = -1
 					continue
@@ -105,10 +137,9 @@ func (p *Proxy) doUpstream(ctx context.Context, path string, body []byte, stream
 				}
 				continue
 			}
-			if p.forceSwitchToKey(model) {
+			if retryKeyed() {
 				resp.Body.Close()
 				cancel()
-				p.circuit.Reset()
 				attempt = -1
 				continue
 			}
