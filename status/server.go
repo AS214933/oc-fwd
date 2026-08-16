@@ -36,6 +36,10 @@ func NewHandler(c *Checker, log *slog.Logger) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(c.Snapshot())
 	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("POST /api/events", func(w http.ResponseWriter, r *http.Request) {
 		if c.cfg.EventToken != "" &&
 			subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")), []byte(c.cfg.EventToken)) != 1 {
