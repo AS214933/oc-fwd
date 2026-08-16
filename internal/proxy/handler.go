@@ -15,6 +15,14 @@ type completionMeta struct {
 
 func (p *Proxy) handleCompletion(format string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if p.cfg.ForceChatInbound && format != "chat" {
+			writeError(w, http.StatusBadRequest,
+				"this proxy enforces Chat Completions inbound (ZEN_FORCE_CHAT_INBOUND=true): "+
+					"only POST /v1/chat/completions is accepted; point your client at "+
+					"/v1/chat/completions (e.g. an openai-compatible client such as opencode)",
+				"invalid_request_error")
+			return
+		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, p.cfg.MaxBodyBytes))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "request body too large or unreadable", "invalid_request_error")

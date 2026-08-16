@@ -3,6 +3,7 @@
 一个简单、高并发的 [opencode ai zen](https://opencode.ai/zen) 反向代理，使用 Go 编写。
 
 - 对外暴露 **OpenAI 兼容**接口：`/v1/chat/completions`（支持 SSE 流式）、`/v1/responses`、`/v1/messages`、`/v1/models`、`/healthz`
+- 强制 Chat Completions：`ZEN_FORCE_CHAT_COMPLETIONS` 统一把 responses/messages 转成 Chat Completions 转发（codex 可正常解析回传的 Responses 格式），`ZEN_FORCE_CHAT_INBOUND` 则强制客户端只用 `/v1/chat/completions`
 - 调用上游可**匿名**（zen free）或带 key（`ZEN_UPSTREAM_API_KEY`），caller 鉴权可选（`ZEN_AUTH_KEY`）
 - 支持模型白名单与别名映射（`ZEN_MODELS` / `ZEN_MODEL_MAP`）
 - 支持 **socks5** 代理，默认 **IPv6 优先**（可强制只走 IPv6）

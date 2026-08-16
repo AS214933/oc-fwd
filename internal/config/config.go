@@ -39,6 +39,7 @@ type Config struct {
 	ForceIPv6            bool
 	RotateIP             bool
 	ForceChatCompletions bool
+	ForceChatInbound     bool
 	LogLevel             string
 }
 
@@ -139,6 +140,7 @@ func Load() (Config, error) {
 		ForceIPv6:            envBool("ZEN_FORCE_IPV6", false),
 		RotateIP:             envBool("ZEN_ROTATE_IP", true),
 		ForceChatCompletions: envBool("ZEN_FORCE_CHAT_COMPLETIONS", false),
+		ForceChatInbound:     envBool("ZEN_FORCE_CHAT_INBOUND", false),
 		LogLevel:             envStr("LOG_LEVEL", "info"),
 	}
 	if cfg.UpstreamTimeout > 0 {

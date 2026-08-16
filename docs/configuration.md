@@ -21,6 +21,7 @@
 | `ZEN_STATUS_URL` | 空 | Status UI 地址；模型状态切换（匿名↔key↔失败）会实时上报到该地址 `/api/events` |
 | `ZEN_STATUS_TOKEN` | 空 | 上报到 Status UI 时携带的 bearer token（与 `STATUS_EVENT_TOKEN` 一致） |
 | `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | 所有请求统一转成 Chat Completions 转发 |
+| `ZEN_FORCE_CHAT_INBOUND` | `false` | 只接受 `/v1/chat/completions` 入站，`/v1/responses` 与 `/v1/messages` 直接报错 |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
 | `ZEN_AUTH_KEY` | 空 | 调用本反代需带的 key；留空 = 免鉴权 |

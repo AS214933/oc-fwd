@@ -878,3 +878,60 @@ func TestForceResponsesStreamRequestUpstreamIgnoresStream(t *testing.T) {
 		t.Fatalf("chat format leaked: %s", body)
 	}
 }
+
+func TestForceChatInboundRejectsNonChatEndpoints(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"chatcmpl-1","object":"chat.completion","model":"m",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.ForceChatInbound = true
+	p := newTestProxy(t, cfg)
+
+	for _, tc := range []struct {
+		path string
+		body string
+	}{
+		{"/v1/responses", `{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`},
+		{"/v1/messages", `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`},
+	} {
+		rec := doJSON(t, p.Handler(), "POST", tc.path, tc.body, nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d body=%s", tc.path, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "ZEN_FORCE_CHAT_INBOUND") ||
+			!strings.Contains(rec.Body.String(), "/v1/chat/completions") {
+			t.Fatalf("%s: error should mention the inbound mode and chat endpoint: %s", tc.path, rec.Body.String())
+		}
+	}
+
+	// /v1/chat/completions still works in force-inbound mode.
+	rec := doJSON(t, p.Handler(), "POST", "/v1/chat/completions",
+		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("chat completions should pass through in force-inbound mode, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestForceChatInboundOffStillConverts(t *testing.T) {
+	// Without ZEN_FORCE_CHAT_INBOUND the /v1/responses endpoint keeps its
+	// normal behavior (passthrough by default, conversion when
+	// ZEN_FORCE_CHAT_COMPLETIONS is enabled).
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"model":"m","choices":[]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := baseCfg()
+	cfg.UpstreamBase = upstream.URL
+	cfg.ForceChatCompletions = true
+	p := newTestProxy(t, cfg)
+	rec := doJSON(t, p.Handler(), "POST", "/v1/responses",
+		`{"model":"m","input":"hi"}`, nil)
+	if rec.Code != 200 {
+		t.Fatalf("responses conversion should still work when force-inbound is off, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
