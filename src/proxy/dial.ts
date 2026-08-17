@@ -1,13 +1,15 @@
 /**
  * Upstream dialing: IPv6-preferred (optionally forced) DNS resolution with a
- * small TTL cache, and a TLS-capable socket factory that routes through the
+ * small TTL cache, and explicit TCP socket creation that routes through the
  * configured SOCKS5 proxy when present.
+ *
+ * We must own the socket: Bun's node:http/node:https ignore custom agents,
+ * `createConnection` and `socket` options and silently dial the host
+ * directly, so requests would egress from the box's own IP instead of the
+ * rotating SOCKS5 pool (getting upstream IP-based rate limits).
  */
 import dns from "node:dns";
-import tls from "node:tls";
-import type { LookupFunction } from "node:net";
-import { Agent as HttpAgent } from "node:http";
-import { Agent as HttpsAgent } from "node:https";
+import { connect as tcpConnect, type LookupFunction, type Socket } from "node:net";
 import { socks5Connect, parseSocks5URL } from "./socks5";
 import type { Config } from "../config";
 
@@ -51,34 +53,88 @@ export function makeLookup(cfg: Config, ttlMs: number): LookupFunction {
   };
 }
 
-type NodeSocket = unknown;
+export interface UpstreamSocketOptions {
+  host: string;
+  port: number;
+  timeoutMs: number;
+}
 
-/** Build an http/https Agent whose connections route through SOCKS5 (+TLS). */
-export function makeSocks5Agent(proxyUrl: string, dialTimeoutMs: number, http: boolean): HttpAgent | HttpsAgent {
-  const proxy = parseSocks5URL(proxyUrl);
-  const createConnection = (
-    options: { host: string; port: number; servername?: string },
-    callback: (err: Error | null, socket?: NodeSocket) => void,
-  ) => {
-    socks5Connect(proxy, { host: options.host, port: options.port }, dialTimeoutMs)
-      .then((sock) => {
-        if (http) {
-          callback(null, sock);
-          return;
-        }
-        const tlsSock = tls.connect({
-          socket: sock as unknown as import("node:tls").ConnectionOptions["socket"],
-          servername: options.servername ?? options.host,
-        });
-        tlsSock.once("secureConnect", () => callback(null, tlsSock));
-        tlsSock.once("error", (err) => callback(err));
-      })
-      .catch((err) => callback(err));
-  };
-  const agentOpts = {
-    createConnection: createConnection as never,
-    keepAlive: false,
-    timeout: dialTimeoutMs,
-  };
-  return http ? new HttpAgent(agentOpts as never) : new HttpsAgent(agentOpts as never);
+/**
+ * Open a brand-new TCP connection to the upstream, routed exactly as
+ * configured: through the SOCKS5 proxy (hostname resolved by the proxy, so
+ * exit IPs rotate per connection), or directly with optional IPv6-first /
+ * IPv6-forced local resolution.
+ */
+export async function openUpstreamSocket(
+  cfg: Pick<Config, "socks5" | "ipv6Prefer" | "forceIPv6" | "dnsCacheTTLMs">,
+  opts: UpstreamSocketOptions,
+): Promise<Socket> {
+  if (cfg.socks5) {
+    return socks5Connect(parseSocks5URL(cfg.socks5), { host: opts.host, port: opts.port }, opts.timeoutMs);
+  }
+  if (cfg.forceIPv6 || cfg.ipv6Prefer) {
+    return connectWithLookup(cfg, opts);
+  }
+  return connectTimeout(opts.host, opts.port, opts.timeoutMs);
+}
+
+async function connectWithLookup(
+  cfg: Pick<Config, "ipv6Prefer" | "forceIPv6" | "dnsCacheTTLMs">,
+  opts: UpstreamSocketOptions,
+): Promise<Socket> {
+  const lookup = makeLookup(cfg as Config, cfg.dnsCacheTTLMs);
+  const addresses = await new Promise<dns.LookupAddress[]>((resolveAddr, rejectAddr) => {
+    lookup(opts.host, { all: true }, (err, addrs) => {
+      if (err) rejectAddr(err);
+      else resolveAddr(addrs as unknown as dns.LookupAddress[]);
+    });
+  });
+  const forceIPv6 = cfg.forceIPv6;
+  let lastErr: Error | null = null;
+  for (const addr of addresses) {
+    if (forceIPv6 && addr.family === 4) continue;
+    if (!forceIPv6 && addr.family !== 6) continue; // prefer 6 first, v4 only after all v6 failed
+    try {
+      return await connectTimeout(addr.address, opts.port, opts.timeoutMs);
+    } catch (e) {
+      lastErr = e instanceof Error ? e : new Error(String(e));
+      if (forceIPv6) throw lastErr;
+    }
+  }
+  if (!forceIPv6) {
+    for (const addr of addresses) {
+      if (addr.family === 6) continue;
+      try {
+        return await connectTimeout(addr.address, opts.port, opts.timeoutMs);
+      } catch (e) {
+        lastErr = e instanceof Error ? e : new Error(String(e));
+      }
+    }
+  }
+  throw lastErr ?? new Error(`no usable address for ${opts.host}`);
+}
+
+function connectTimeout(host: string, port: number, timeoutMs: number): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const sock = tcpConnect({ host, port });
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      sock.destroy();
+      reject(new Error(`dial ${host}:${port} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    sock.once("connect", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(sock);
+    });
+    sock.once("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(e);
+    });
+  });
 }

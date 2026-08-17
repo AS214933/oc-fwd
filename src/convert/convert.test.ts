@@ -174,8 +174,12 @@ describe("chat chunk -> responses SSE", () => {
     expect(types).toContain("response.output_text.done");
     expect(types).toContain("response.output_item.done");
     expect(types[types.length - 1]).toBe("response.completed");
-    const completed = JSON.parse(events[events.length - 1]!.data) as { response: { output: unknown[]; usage: { total_tokens: number } } };
+    const completed = JSON.parse(events[events.length - 1]!.data) as {
+      response: { output: unknown[]; usage: { input_tokens: number; output_tokens: number; total_tokens: number } };
+    };
     expect(completed.response.output).toHaveLength(1);
+    expect(completed.response.usage.input_tokens).toBe(1);
+    expect(completed.response.usage.output_tokens).toBe(2);
     expect(completed.response.usage.total_tokens).toBe(3);
   });
 

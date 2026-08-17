@@ -25,6 +25,9 @@ const server = Bun.serve({
   port,
   development: false,
   maxRequestBodySize: cfg.maxBodyBytes,
+  // Upstream zen responses can stall for longer than Bun's default 10s idle
+  // window (free-tier thinking pauses); never cut a client mid-stream.
+  idleTimeout: 0,
   fetch: proxy.handler(),
 });
 

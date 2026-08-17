@@ -397,6 +397,16 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
     data: JSON.stringify({ type: typ, ...payload }),
   });
 
+  const responseUsage = (): Record<string, unknown> | undefined => {
+    if (!usage) return undefined;
+    const input = usage.prompt_tokens ?? 0;
+    const output = usage.completion_tokens ?? 0;
+    return {
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: usage.total_tokens ?? input + output,
+    };
+  };
   const responseBody = (status: string, output: unknown[]): Record<string, unknown> => ({
     id: "resp_1",
     object: "response",
@@ -404,7 +414,7 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
     status,
     model,
     output,
-    ...(usage ? { usage } : {}),
+    usage: responseUsage(),
   });
 
   const finishEvents = (): SseEvent[] => {

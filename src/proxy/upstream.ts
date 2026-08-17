@@ -3,14 +3,13 @@
  * Retry-After, shields the upstream with a 429 circuit breaker, and drives
  * the per-model anonymous -> API-key fallback.
  */
-import http from "node:http";
-import https from "node:https";
 import { Readable } from "node:stream";
 import type { Logger } from "../log";
 import type { Config } from "../config";
 import { Circuit } from "./circuit";
 import { FallbackState } from "./fallback";
-import { makeLookup, makeSocks5Agent } from "./dial";
+import { openUpstreamSocket } from "./dial";
+import { buildRequest, http1Request } from "./http1";
 
 export interface UpstreamResponse {
   status: number;
@@ -34,7 +33,6 @@ interface RawResponse {
 }
 
 export class UpstreamClient {
-  private socksAgents = new Map<string, http.Agent | https.Agent>();
   private keys: string[];
   private probeTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -74,7 +72,7 @@ export class UpstreamClient {
     for (;;) {
       const { key, hasKey } = this.requestKey(model);
 
-      if (!this.circuit.allow()) {
+      if (attempt === 0 && !this.circuit.allow()) {
         if (hasKey) {
           this.fallback.reportKeyedResult(model, false, "circuit open");
           throw new CircuitOpenError();
@@ -184,75 +182,32 @@ export class UpstreamClient {
     const url = this.cfg.upstreamBase + path;
     const u = new URL(url);
     const isHttps = u.protocol === "https:";
-    const mod = isHttps ? https : http;
+    const port = u.port ? Number(u.port) : isHttps ? 443 : 80;
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: stream ? "text/event-stream" : "application/json",
       "User-Agent": "oc-fwd/2.0 (bun)",
+      Connection: "close",
     };
     if (hasKey) headers.Authorization = `Bearer ${key}`;
 
-    let agent: http.Agent | https.Agent | false = undefined as never;
-    let lookup: import("node:net").LookupFunction | undefined;
-    if (this.cfg.socks5) {
-      const cacheKey = isHttps ? "https" : "http";
-      let a = this.socksAgents.get(cacheKey);
-      if (!a) {
-        a = makeSocks5Agent(this.cfg.socks5, this.cfg.dialTimeoutMs, !isHttps) as http.Agent;
-        this.socksAgents.set(cacheKey, a);
-      }
-      agent = a;
-    } else {
-      if (this.cfg.rotateIP) {
-        agent = false; // fresh TCP connection per request => rotating exit IPs
-      }
-      if (this.cfg.ipv6Prefer || this.cfg.forceIPv6) {
-        lookup = makeLookup(this.cfg, this.cfg.dnsCacheTTLMs);
-      }
-    }
-
-    const opts: http.RequestOptions = {
-      method: "POST",
-      headers,
-      timeout: this.cfg.dialTimeoutMs,
-      ...(agent !== undefined ? { agent } : {}),
-      ...(lookup ? { lookup } : {}),
-    };
-
-    let controller: AbortController | null = null;
-    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
-    if (!stream && this.cfg.upstreamTimeoutSet) {
-      controller = new AbortController();
-      timeoutTimer = setTimeout(() => controller?.abort(), this.cfg.upstreamTimeoutMs);
-    }
-
-    return new Promise<UpstreamResponse>((resolve, reject) => {
-      const req = mod.request(u, opts, (res) => {
-        if (timeoutTimer) clearTimeout(timeoutTimer);
-        resolve({
-          status: res.statusCode ?? 0,
-          headers: toHeaders(res.headers),
-          body: nodeToWeb(res),
-          destroy: () => res.destroy(),
-        });
-      });
-      req.on("timeout", () => req.destroy(new Error("upstream dial/request timeout")));
-      req.on("error", (err) => {
-        if (timeoutTimer) clearTimeout(timeoutTimer);
-        reject(err);
-      });
-      const onAbort = () => req.destroy(new Error("request aborted"));
-      if (controller) controller.signal.addEventListener("abort", onAbort, { once: true });
-      if (signal) {
-        if (signal.aborted) {
-          req.destroy(new Error("request aborted"));
-          return;
-        }
-        signal.addEventListener("abort", onAbort, { once: true });
-      }
-      req.end(body);
-    });
+    const request = buildRequest("POST", u.pathname + u.search, u.host, headers, body);
+    return openUpstreamSocket(this.cfg, { host: u.hostname, port, timeoutMs: this.cfg.dialTimeoutMs }).then((tcp) =>
+      http1Request({
+        tcp,
+        tls: isHttps,
+        servername: u.hostname,
+        request,
+        totalTimeoutMs: !stream && this.cfg.upstreamTimeoutSet ? this.cfg.upstreamTimeoutMs : undefined,
+        signal,
+      }),
+    ).then((r) => ({
+      status: r.status,
+      headers: r.headers,
+      body: nodeToWeb(r.body),
+      destroy: r.destroy,
+    }));
   }
 
   /** Tiny anonymous probe used by the recovery loop. */
@@ -261,52 +216,29 @@ export class UpstreamClient {
     const body = JSON.stringify({ model: probeModel, messages: [{ role: "user", content: "ping" }], max_tokens: 1 });
     const url = this.cfg.upstreamBase + "/chat/completions";
     const u = new URL(url);
-    const mod = u.protocol === "https:" ? https : http;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const isHttps = u.protocol === "https:";
+    const port = u.port ? Number(u.port) : isHttps ? 443 : 80;
+    const request = buildRequest("POST", u.pathname + u.search, u.host, {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "User-Agent": "oc-fwd/2.0 (bun)",
+      Connection: "close",
+    }, body);
     try {
-      const resp = await new Promise<{ status: number }>((resolve, reject) => {
-        const req = mod.request(
-          u,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-              "User-Agent": "oc-fwd/2.0 (bun)",
-            },
-            timeout: timeoutMs,
-            ...(this.cfg.socks5
-              ? { agent: this.makeProbeAgent(u.protocol === "https:") }
-              : this.cfg.rotateIP
-                ? { agent: false }
-                : {}),
-            ...(this.cfg.ipv6Prefer || this.cfg.forceIPv6 ? { lookup: makeLookup(this.cfg, this.cfg.dnsCacheTTLMs) } : {}),
-          },
-          (res) => resolve({ status: res.statusCode ?? 0 }),
-        );
-        req.on("error", reject);
-        req.on("timeout", () => req.destroy(new Error("probe timeout")));
-        controller.signal.addEventListener("abort", () => req.destroy(new Error("probe aborted")), { once: true });
-        req.end(body);
+      const tcp = await openUpstreamSocket(this.cfg, { host: u.hostname, port, timeoutMs });
+      const resp = await http1Request({
+        tcp,
+        tls: isHttps,
+        servername: u.hostname,
+        request,
+        totalTimeoutMs: timeoutMs,
       });
+      resp.destroy();
       return resp.status >= 200 && resp.status < 300;
     } catch {
       this.log.debug("no-key probe failed", { model: probeModel });
       return false;
-    } finally {
-      clearTimeout(timer);
     }
-  }
-
-  private makeProbeAgent(isHttps: boolean): http.Agent {
-    const cacheKey = isHttps ? "https" : "http";
-    let a = this.socksAgents.get(cacheKey);
-    if (!a) {
-      a = makeSocks5Agent(this.cfg.socks5, this.cfg.dialTimeoutMs, !isHttps) as http.Agent;
-      this.socksAgents.set(cacheKey, a);
-    }
-    return a;
   }
 
   startProbeLoop() {
@@ -376,19 +308,6 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       signal.addEventListener("abort", onAbort, { once: true });
     }
   });
-}
-
-function toHeaders(raw: http.IncomingHttpHeaders): Headers {
-  const h = new Headers();
-  for (const [k, v] of Object.entries(raw)) {
-    if (v === undefined) continue;
-    if (Array.isArray(v)) {
-      for (const x of v) h.append(k, x);
-    } else {
-      h.set(k, v);
-    }
-  }
-  return h;
 }
 
 /** Convert a Node Readable into a web ReadableStream, preserving backpressure. */

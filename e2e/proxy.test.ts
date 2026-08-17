@@ -48,9 +48,12 @@ async function testConfig(overrides: Partial<Config> = {}): Promise<Config> {
 
 async function startProxy(cfg: Config) {
   const proxy = new Proxy(cfg, new Logger("error"));
-  const server = Bun.serve({ port: 0, development: false, fetch: proxy.handler() });
+  // Mirror production: never let Bun's 10s idleTimeout cut a slow upstream stream.
+  const server = Bun.serve({ port: 0, development: false, idleTimeout: 0, fetch: proxy.handler() });
   return { proxy, server, url: `http://127.0.0.1:${server.port}` };
 }
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 async function post(body: unknown, path = "/v1/chat/completions", headers: Record<string, string> = {}) {
   return fetch(`${url()}${path}`, {
@@ -399,6 +402,46 @@ describe("streaming", () => {
     expect(types).toContain("response.created");
     expect(types).toContain("response.completed");
   });
+
+  test("stream survives an upstream idle gap longer than Bun's 10s idleTimeout", async () => {
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      const enc = new TextEncoder();
+      const part1 = { id: "chatcmpl_1", object: "chat.completion.chunk", model: ctx.model, created: 1700000000, choices: [{ index: 0, delta: { role: "assistant" } }] };
+      const part2 = { id: "chatcmpl_1", object: "chat.completion.chunk", model: ctx.model, created: 1700000000, choices: [{ index: 0, delta: { content: "after-gap" } }] };
+      const final: Record<string, unknown> = {
+        id: "chatcmpl_1", object: "chat.completion.chunk", model: ctx.model, created: 1700000000,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      };
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(part1)}\n\n`));
+            await sleep(11000);
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(part2)}\n\n`));
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(final)}\n\ndata: [DONE]\n\n`));
+            controller.close();
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    });
+    const res = await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }], stream: true });
+    expect(res.status).toBe(200);
+    const events = await collectData(res);
+    const contents = events
+      .map((e) => {
+        try {
+          return (JSON.parse(e.data) as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0]?.delta?.content;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter(Boolean);
+    expect(contents).toContain("after-gap");
+    expect(events.some((e) => e.data === "[DONE]")).toBe(true);
+  }, 20000);
 });
 
 describe("protocol correctness with tools", () => {
@@ -487,6 +530,43 @@ describe("retry + fallback", () => {
     expect(res.status).toBe(200);
     const keyed = mock.requests.filter((r) => r.headers.get("Authorization")?.includes("key-xyz"));
     expect(keyed.length).toBeGreaterThan(0);
+  });
+
+  test("concurrent 429s don't truncate in-flight retries when the circuit opens", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    // Every attempt gets a 429. Block the first 6 calls (the six requests'
+    // attempt-0 dials) until all are in flight, so the circuit opens while
+    // every request is still inside its retry loop.
+    mock.setHandler(async (ctx) => {
+      calls++;
+      if (calls <= 6) {
+        if (calls === 6) release();
+        await gate;
+      }
+      return jsonResponse({ error: { message: "rate limited", code: "rate_limit_exceeded" } }, 429);
+    });
+    const cfg = await testConfig({
+      retryMax: 3,
+      circuitFailures: 2,
+      retryBaseBackoffMs: 0,
+      retryMaxBackoffMs: 0,
+    });
+    const { url: u } = await startProxy(cfg);
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        fetch(`${u}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+        }),
+      ),
+    );
+    for (const r of results) expect(r.status).toBe(429);
+    // 6 requests * (retryMax + 1) attempts: the circuit opening mid-flight
+    // must not cut the in-flight retry ladders short.
+    expect(calls).toBe(24);
   });
 });
 

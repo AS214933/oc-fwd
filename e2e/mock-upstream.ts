@@ -28,6 +28,7 @@ export class MockZen {
     this.server = Bun.serve({
       port: 0,
       development: false,
+      idleTimeout: 0,
       fetch: async (req) => {
         const url = new URL(req.url);
         const rawPath = url.pathname;
