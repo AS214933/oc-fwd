@@ -1,32 +1,31 @@
 (function () {
   "use strict";
 
-  // state -> {label, pillClass, sub}
   var STATES = {
-    anonymous: { label: "匿名", cls: "green", sub: "匿名模式运行中" },
-    keyed: { label: "已切 Key", cls: "blue", sub: "已切换 API Key（匿名失败）" },
-    keyed_failed: { label: "故障", cls: "red", sub: "API Key 也失败（全部失败）" },
-    unknown: { label: "未知", cls: "unknown", sub: "暂无状态" }
+    anonymous:   { label: "Operational",      cls: "green",  pill: "pill-green"  },
+    keyed:       { label: "Degraded",          cls: "blue",   pill: "pill-blue"   },
+    keyed_failed:{ label: "Major Outage",      cls: "red",    pill: "pill-red"    },
+    unknown:     { label: "Unknown",           cls: "unknown",pill: "pill-unknown"}
   };
 
   var OVERALL = {
-    green: { title: "运行正常", sub: "所有模型处于匿名模式，调用正常" },
-    blue: { title: "部分降级", sub: "部分模型已切换到 API Key（匿名调用失败）" },
-    red: { title: "故障", sub: "存在全部调用失败的模型（API Key 也失败）" },
-    unknown: { title: "等待数据…", sub: "正在等待反代上报模型状态" }
+    green:   { title: "All Systems Operational",  sub: "All models are running in anonymous mode." },
+    blue:    { title: "Partial System Degradation", sub: "Some models have switched to API key mode (anonymous unavailable)." },
+    red:     { title: "Major System Outage",       sub: "Some models have lost all connectivity." },
+    unknown: { title: "Awaiting Data…",            sub: "Waiting for the proxy to report model statuses." }
   };
 
   var REASONS = {
-    "anonymous_failures": "匿名请求连续失败",
-    "server_error": "上游 5xx 重试耗尽",
-    "keyed_error": "API Key 调用结果变化",
-    "probe_recovered": "匿名探测恢复",
-    "reconciled": "与代理校准",
-    "initial": "开始监控",
-    "circuit open": "熔断打开"
+    "anonymous_failures": "Anonymous consecutive failures",
+    "server_error":       "Upstream 5xx retry exhausted",
+    "keyed_error":        "API key call failed",
+    "probe_recovered":    "Anonymous probe recovered",
+    "reconciled":         "Reconciled with proxy",
+    "initial":            "Monitoring started",
+    "circuit open":       "Circuit breaker opened"
   };
 
-  var el = function (id) { return document.getElementById(id); };
+  function el(id) { return document.getElementById(id); }
 
   function esc(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -34,21 +33,31 @@
     });
   }
 
-  function timeText(ms) {
-    if (!ms) return "—";
-    return new Date(ms).toLocaleString();
-  }
-
   function ago(ms) {
     if (!ms) return "—";
     var d = Math.max(0, Date.now() - ms);
     var s = Math.floor(d / 1000);
-    if (s < 60) return s + " 秒";
+    if (s < 60) return s + "s";
     var m = Math.floor(s / 60);
-    if (m < 60) return m + " 分钟";
+    if (m < 60) return m + "m";
     var h = Math.floor(m / 60);
-    if (h < 24) return h + " 小时";
-    return Math.floor(h / 24) + " 天";
+    if (h < 24) return h + "h";
+    return Math.floor(h / 24) + "d";
+  }
+
+  function timeShort(ms) {
+    if (!ms) return "";
+    var d = new Date(ms);
+    var hh = String(d.getHours()).padStart(2, "0");
+    var mm = String(d.getMinutes()).padStart(2, "0");
+    var ss = String(d.getSeconds()).padStart(2, "0");
+    return hh + ":" + mm + ":" + ss;
+  }
+
+  function dateKey(ms) {
+    if (!ms) return "";
+    var d = new Date(ms);
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
   }
 
   function reasonText(ev) {
@@ -57,76 +66,104 @@
     return ev.detail ? r + " · " + ev.detail : r;
   }
 
-  // Per-model history bar, weighted by real time: each state segment spans
-  // from its event until the next event (or now), so a model that stayed
-  // green for a long time shows a long green bar and a brief keyed episode
-  // shows a thin blue slice - like status-page uptime graphs.
-  function historyBar(model, timeline, nowMs) {
+  // Build an uptime bar from timeline events, similar to Statuspage 90-day bar.
+  // We split into ~24 segments covering the full history span.
+  function uptimeBar(model, timeline, nowMs) {
     var evs = (timeline || []).filter(function (e) {
       return e.model === model && STATES[e.to];
     }).sort(function (a, b) { return a.at - b.at; });
     if (!evs.length) {
-      return "<div class=\"bar\"><i class=\"unknown\" style=\"flex:1\"></i></div>";
+      return '<div class="uptime-bar">' + Array(24).fill('<i></i>').join("") + '</div>';
     }
     var start = evs[0].at;
     var total = Math.max(1, nowMs - start);
-    var html = evs.map(function (ev, i) {
-      var to = i + 1 < evs.length ? evs[i + 1].at : Math.max(nowMs, ev.at + 1);
-      var flex = Math.max(0.5, (to - ev.at) / total * 100);
-      return "<i class=\"" + STATES[ev.to].cls + "\" style=\"flex:" + flex.toFixed(2) + "\"" +
-        " title=\"" + STATES[ev.to].label + "\"></i>";
-    }).join("");
-    return "<div class=\"bar\">" + html + "</div>";
+    var segs = 24;
+    var segDur = total / segs;
+    var bars = [];
+    for (var s = 0; s < segs; s++) {
+      var t0 = start + s * segDur;
+      var t1 = t0 + segDur;
+      // Find what state this segment was mostly in
+      var state = "unknown";
+      for (var j = 0; j < evs.length; j++) {
+        if (evs[j].at <= t0) {
+          state = evs[j].to;
+        }
+      }
+      var cls = state === "anonymous" ? "g" : state === "keyed" ? "b" : state === "keyed_failed" ? "r" : "";
+      bars.push('<i class="' + cls + '"></i>');
+    }
+    return '<div class="uptime-bar">' + bars.join("") + '</div>';
   }
 
   function render(snap) {
     var overall = snap.overall || "unknown";
     var ov = OVERALL[overall] || OVERALL.unknown;
-    var banner = el("banner");
-    banner.className = "banner " + overall;
+    var stClass = "status-" + overall;
+
+    // Banner
+    var banner = el("statusBanner");
+    banner.className = "status-banner " + stClass;
     el("bannerTitle").textContent = ov.title;
     el("bannerSub").textContent = ov.sub;
 
-    el("lastSync").textContent = "校准：" + timeText(snap.last_reconcile) + " · 间隔 " + snap.interval + "s";
-    el("lastEvent").textContent = "最近切换：" + timeText(snap.last_event_at);
+    // Meta
+    el("lastSync").textContent = "Last sync: " + (snap.last_reconcile ? new Date(snap.last_reconcile).toLocaleString() : "—") + " · Interval " + snap.interval + "s";
 
+    // Components
     var models = snap.models || [];
     var grid = el("models");
     if (!models.length) {
-      grid.innerHTML = "<div class=\"empty muted\">暂无模型状态（等待反代上报或 /debug/modes 可用）</div>";
+      grid.innerHTML = '<div class="component-row component-empty"><span class="component-name muted">No model data yet — waiting for proxy report or /debug/modes</span></div>';
     } else {
       grid.innerHTML = models.map(function (m) {
         var st = STATES[m.state] || STATES.unknown;
-        var bar = historyBar(m.model, snap.timeline, Date.now());
-        return "<article class=\"card\">" +
-          "<div class=\"head\">" +
-          "<span class=\"name\">" + esc(m.model) + "</span>" +
-          "<span class=\"pill " + st.cls + "\" title=\"" + st.sub + "\"><i></i>" + st.label + "</span>" +
-          "</div>" +
-          "<dl class=\"facts\">" +
-          "<div><dt>当前状态</dt><dd>" + st.sub + "</dd></div>" +
-          "<div><dt>持续时长</dt><dd>" + ago(m.since) + "</dd></div>" +
-          "<div><dt>累计切换</dt><dd>" + m.switches + " 次</dd></div>" +
-          "<div><dt>最近原因</dt><dd>" + esc(reasonText(m.last_event) || "—") + "</dd></div>" +
-          "</dl>" +
-          "<div class=\"hist\">" + bar +
-          "<span class=\"hist-label\">历史状态（按时间加权，绿=匿名 / 蓝=key / 红=失败）</span></div>" +
-          "</article>";
+        var bar = uptimeBar(m.model, snap.timeline, Date.now());
+        var detail = "Duration " + ago(m.since) + " · Switches " + m.switches;
+        var reason = reasonText(m.last_event);
+        if (reason) detail += " · " + reason;
+        return '<div class="component-row">' +
+          '<span class="component-name">' + esc(m.model) + '</span>' +
+          '<div class="component-right">' +
+            '<span class="status-pill ' + st.pill + '"><span class="dot"></span>' + st.label + '</span>' +
+          '</div>' +
+          bar +
+          '<div class="component-detail"><span>' + esc(detail) + '</span></div>' +
+        '</div>';
       }).join("");
     }
 
+    // Incidents / timeline
     var timeline = snap.timeline || [];
-    el("timelineWrap").classList.toggle("hidden", timeline.length === 0);
-    el("timeline").innerHTML = timeline.slice(-50).reverse().map(function (ev) {
-      var from = STATES[ev.from] || { label: "未知", cls: "unknown" };
-      var to = STATES[ev.to] || { label: "未知", cls: "unknown" };
-      return "<li><time>" + timeText(ev.at) + "</time>" +
-        "<span class=\"i-model\">" + esc(ev.model) + "</span>" +
-        "<span class=\"pill " + from.cls + "\">" + from.label + "</span>" +
-        "<span class=\"arrow\">→</span>" +
-        "<span class=\"pill " + to.cls + "\">" + to.label + "</span>" +
-        "<span class=\"muted\">" + esc(reasonText(ev)) + "</span></li>";
-    }).join("");
+    var section = el("incidentsSection");
+    section.classList.toggle("hidden", timeline.length === 0);
+    if (timeline.length) {
+      // Group by date
+      var groups = {};
+      var order = [];
+      timeline.slice(-80).reverse().forEach(function (ev) {
+        var dk = dateKey(ev.at);
+        if (!groups[dk]) { groups[dk] = []; order.push(dk); }
+        groups[dk].push(ev);
+      });
+      var html = "";
+      order.forEach(function (dk) {
+        html += '<div class="incidents-day-header">' + dk + '</div>';
+        groups[dk].forEach(function (ev) {
+          var from = STATES[ev.from] || { label: "?", pill: "pill-unknown" };
+          var to = STATES[ev.to] || { label: "?", pill: "pill-unknown" };
+          html += '<div class="incident-row">' +
+            '<span class="incident-time">' + timeShort(ev.at) + '</span>' +
+            '<span class="incident-model">' + esc(ev.model) + '</span>' +
+            '<span class="status-pill ' + from.pill + '"><span class="dot"></span>' + from.label + '</span>' +
+            '<span class="incident-arrow">→</span>' +
+            '<span class="status-pill ' + to.pill + '"><span class="dot"></span>' + to.label + '</span>' +
+            '<span class="incident-reason">' + esc(reasonText(ev)) + '</span>' +
+          '</div>';
+        });
+      });
+      el("timeline").innerHTML = html;
+    }
   }
 
   function poll() {
@@ -134,8 +171,9 @@
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
       .then(render)
       .catch(function (err) {
-        el("bannerTitle").textContent = "无法获取状态";
+        el("bannerTitle").textContent = "Connection Error";
         el("bannerSub").textContent = err.message;
+        el("statusBanner").className = "status-banner status-red";
       });
   }
 

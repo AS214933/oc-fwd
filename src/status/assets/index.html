@@ -2,53 +2,60 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Zen Proxy 状态</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  <title>Zen Proxy Status</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="logo" aria-hidden="true"></span>
-      <div>
-        <h1>Zen Proxy 状态</h1>
-        <p class="sub">模型切换状态 · 每次 匿名 / API Key / 全部失败 切换都会上报</p>
+  <div class="page-wrap">
+    <header class="masthead">
+      <div class="masthead-inner">
+        <div class="logo-mark" aria-hidden="true"></div>
+        <div class="masthead-text">
+          <h1>Zen Proxy</h1>
+          <span class="masthead-sub">Status</span>
+        </div>
       </div>
-    </div>
-    <div class="meta">
-      <span id="lastSync" class="muted">等待数据…</span>
-      <span id="lastEvent" class="muted"></span>
-    </div>
-  </header>
-
-  <main>
-    <section id="banner" class="banner unknown" role="status">
-      <div class="banner-dot" aria-hidden="true"></div>
-      <div>
-        <h2 id="bannerTitle">等待数据…</h2>
-        <p id="bannerSub">正在等待反代上报模型状态</p>
+      <div class="masthead-meta">
+        <span id="lastSync" class="meta-text">Waiting…</span>
       </div>
-    </section>
+    </header>
 
-    <section class="legend">
-      <span><i class="swatch green" aria-hidden="true"></i>绿色：匿名模式运行中</span>
-      <span><i class="swatch blue" aria-hidden="true"></i>蓝色：已切换 API Key（匿名失败）</span>
-      <span><i class="swatch red" aria-hidden="true"></i>红色：API Key 也失败（全部失败）</span>
-    </section>
+    <main class="content">
+      <!-- Overall status banner -->
+      <div id="statusBanner" class="status-banner status-unknown">
+        <div class="banner-icon" aria-hidden="true">
+          <svg class="icon-check" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          <svg class="icon-warn" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <svg class="icon-error" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+          <svg class="icon-unknown" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        </div>
+        <div class="banner-text">
+          <h2 id="bannerTitle">Waiting for data…</h2>
+          <p id="bannerSub" class="banner-sub"></p>
+        </div>
+      </div>
 
-    <section id="models" class="grid">
-      <div class="empty muted">暂无模型状态（等待反代上报或 /debug/modes 可用）</div>
-    </section>
+      <!-- Components section -->
+      <section class="components-section">
+        <div id="models" class="components-list">
+          <div class="component-row component-empty">
+            <span class="component-name muted">No model data yet</span>
+          </div>
+        </div>
+      </section>
 
-    <section id="timelineWrap" class="panel hidden">
-      <h3>切换记录</h3>
-      <ul id="timeline" class="incidents"></ul>
-    </section>
-  </main>
+      <!-- Incidents / timeline section -->
+      <section id="incidentsSection" class="incidents-section hidden">
+        <h3 class="section-title">Recent Activity</h3>
+        <div id="timeline" class="incidents-list"></div>
+      </section>
+    </main>
 
-  <footer class="footer">
-    <p class="muted">反代（zen-proxy）每次发生模型状态切换会主动上报到本页面，本页面也会定期与 /debug/modes 校准。</p>
-  </footer>
+    <footer class="page-footer">
+      <span class="muted">Powered by Zen Proxy · Data refreshes every 5 seconds</span>
+    </footer>
+  </div>
   <script src="/assets/app.js"></script>
 </body>
 </html>
