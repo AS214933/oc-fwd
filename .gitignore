@@ -6,3 +6,5 @@ coverage.out
 node_modules/
 dist/
 .bun
+data/
+*.status.json

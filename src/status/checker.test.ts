@@ -9,6 +9,9 @@
  *    keyed_failed) to the banner state the frontend understands.
  */
 import { test, expect } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { JsonStore } from "./store";
 import { Checker } from "./checker";
 import { Logger } from "../log";
 
@@ -187,4 +190,29 @@ test("24h default window prunes events older than 24h even without newer events"
   c.ingest({ model: "m2", to: "anonymous", at: Date.now() });
   expect(c.snapshot().timeline.length).toBe(1);
   expect(c.snapshot().timeline[0]?.model).toBe("m2");
+});
+
+test("restoreDraft rehydrates models and timeline from disk", async () => {
+  const file = join(tmpdir(), "checker-restore-" + Math.random().toString(36).slice(2) + ".json");
+  const store = new JsonStore(file);
+  const first = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, store });
+  first.ingest({ model: "m1", to: "keyed", from: "anonymous", reason: "upstream_error", at: Date.now() - 1000 });
+  first.ingest({ model: "m2", to: "anonymous", reason: "initial", at: Date.now() });
+  store.save({ v: 1, savedAt: Date.now(), models: first.snapshot().models, timeline: first.snapshot().timeline });
+  await store.flush();
+
+  const second = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, store: new JsonStore(file) });
+  await second.restoreDraft();
+  const snap = second.snapshot();
+  expect(snap.models.map((m) => m.model).sort()).toEqual(["m1", "m2"]);
+  expect(snap.models.find((m) => m.model === "m1")?.state).toBe("keyed");
+  expect(snap.timeline.length).toBe(2);
+});
+
+test("restoreDraft ignores corrupt store content", async () => {
+  const file = join(tmpdir(), "checker-corrupt-" + Math.random().toString(36).slice(2) + ".json");
+  await Bun.write(file, "garbage");
+  const c = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, store: new JsonStore(file) });
+  await c.restoreDraft();
+  expect(c.snapshot().models.length).toBe(0);
 });

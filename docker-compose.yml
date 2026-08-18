@@ -29,11 +29,18 @@ services:
       STATUS_PROXY_AUTH: "${ZEN_AUTH_KEY:-}"
       STATUS_EVENT_TOKEN: "${ZEN_STATUS_TOKEN:-}"
       STATUS_INTERVAL: "${STATUS_INTERVAL:-15}"
+      # 落盘持久化：重启 Status UI 不丢历史，volume 挂载在下方映射
+      STATUS_DB: /data/status.json
     env_file:
       - .env
+    volumes:
+      - status-ui-data:/data
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 5s
+
+volumes:
+  status-ui-data:

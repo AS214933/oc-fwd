@@ -4,6 +4,7 @@
  */
 import { Logger } from "../log";
 import { Checker, type StateEvent } from "./checker";
+import { JsonStore, defaultStoreFile } from "./store";
 
 export interface StatusUIConfig {
   listen: string;
@@ -13,6 +14,7 @@ export interface StatusUIConfig {
   intervalMs: number;
   timeoutMs: number;
   history: number;
+  storeFile: string;
 }
 
 export function loadStatusConfig(env: NodeJS.ProcessEnv = process.env): StatusUIConfig {
@@ -20,7 +22,9 @@ export function loadStatusConfig(env: NodeJS.ProcessEnv = process.env): StatusUI
   const interval = Number(env.STATUS_INTERVAL || "15");
   const timeout = Number(env.STATUS_TIMEOUT || "30");
   const history = Number(env.STATUS_HISTORY || "120");
+  const storeFile = env.STATUS_DB || defaultStoreFile();
   if (!listen) throw new Error("STATUS_LISTEN_ADDR cannot be empty");
+  if (!storeFile) throw new Error("STATUS_DB cannot be empty when set");
   if (!env.STATUS_PROXY) throw new Error("STATUS_PROXY cannot be empty");
   if (!(interval > 0)) throw new Error("invalid STATUS_INTERVAL: must be > 0");
   if (!(timeout > 0)) throw new Error("invalid STATUS_TIMEOUT: must be > 0");
@@ -33,6 +37,7 @@ export function loadStatusConfig(env: NodeJS.ProcessEnv = process.env): StatusUI
     intervalMs: interval * 1000,
     timeoutMs: timeout * 1000,
     history,
+    storeFile,
   };
 }
 
@@ -44,6 +49,7 @@ function parseListen(addr: string): { hostname: string; port: number } {
 }
 
 export function startStatusUI(cfg: StatusUIConfig, log: Logger) {
+  const store = new JsonStore(cfg.storeFile);
   const checker = new Checker(log, {
     proxyUrl: cfg.proxy,
     proxyAuth: cfg.proxyAuth,
@@ -51,8 +57,12 @@ export function startStatusUI(cfg: StatusUIConfig, log: Logger) {
     intervalMs: cfg.intervalMs,
     timeoutMs: cfg.timeoutMs,
     history: cfg.history,
+    store,
   });
-  checker.start();
+  void checker.restoreDraft().then(() => {
+    checker.start();
+    log.info("status-ui history store ready", { file: cfg.storeFile });
+  });
 
   const assetsDir = new URL("../status/assets/", import.meta.url).pathname;
 
@@ -96,7 +106,7 @@ export function startStatusUI(cfg: StatusUIConfig, log: Logger) {
     },
   });
   log.info("status-ui listening", { hostname: parseListen(cfg.listen).hostname, port: parseListen(cfg.listen).port });
-  return server;
+  return { server, checker };
 }
 
 function contentType(file: string): Record<string, string> {

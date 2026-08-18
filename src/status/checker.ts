@@ -9,6 +9,7 @@
  * the retention window are pruned from memory.
  */
 import { Logger } from "../log";
+import { JsonStore, type StoreData } from "./store";
 
 export type State = "anonymous" | "keyed" | "keyed_failed" | "unknown";
 
@@ -55,6 +56,7 @@ export class Checker {
   private intervalMs: number;
   private timeoutMs: number;
   private history: number;
+  private store?: JsonStore;
 
   constructor(
     private log: Logger,
@@ -65,6 +67,7 @@ export class Checker {
       intervalMs: number;
       timeoutMs: number;
       history: number;
+      store?: JsonStore;
     },
   ) {
     this.proxyUrl = opts.proxyUrl;
@@ -73,11 +76,48 @@ export class Checker {
     this.intervalMs = opts.intervalMs;
     this.timeoutMs = opts.timeoutMs;
     this.history = opts.history;
+    this.store = opts.store;
   }
 
   start() {
     void this.reconcile();
     setInterval(() => void this.reconcile(), this.intervalMs);
+  }
+
+  /** Queue a debounced disk write of the current state (best-effort). */
+  private queueSave() {
+    const data: StoreData = {
+      v: 1,
+      savedAt: Date.now(),
+      models: [...this.models.values()],
+      timeline: [...this.timeline],
+    };
+    this.store?.save(data);
+  }
+
+  /** Rehydrate from disk after startup; must run before any ingest. */
+  async restoreDraft(): Promise<void> {
+    if (!this.store) return;
+    try {
+      const data = await this.store.load();
+      if (!data) return;
+      for (const m of data.models) {
+        if (!m || typeof m.model !== "string") continue;
+        this.models.set(m.model, { ...m, last_event: m.last_event ?? null });
+      }
+      this.timeline = (data.timeline || []).filter((e) => e && typeof e.at === "number");
+      this.sweep(Date.now());
+      if (this.timeline.length > this.history) {
+        this.timeline = this.timeline.slice(-this.history);
+      }
+      this.log.info("status history restored from disk", {
+        file: this.store.path(),
+        models: this.models.size,
+        timeline: this.timeline.length,
+      });
+    } catch {
+      this.log.debug("status history restore failed");
+    }
   }
 
   ingest(ev: StateEvent) {
@@ -101,6 +141,7 @@ export class Checker {
     this.timeline.push(entry);
     this.sweep(at);
     if (this.timeline.length > this.history) this.timeline.shift();
+    this.queueSave();
   }
 
   snapshot(): Snapshot {
@@ -166,8 +207,14 @@ export class Checker {
         });
       }
       this.lastReconcile = now;
+      this.queueSave();
     } catch {
       this.log.debug("reconcile failed");
     }
+  }
+
+  /** Flush any pending disk write (shutdown). */
+  async flushStore(): Promise<void> {
+    await this.store?.flush();
   }
 }

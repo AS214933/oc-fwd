@@ -11,6 +11,7 @@ Status UI 关注的是**各模型的切换情况**：当且仅当某模型在状
   - 匿名探测恢复 → 模型切回 **anonymous**。
 - **绿色** = 匿名模式运行中；**蓝色** = 已切换 API Key（匿名失败，降级）；**红色** = key 也失败（全部失败）。
 - 页面展示每个模型的当前状态、持续时长、累计切换次数、最近原因，以及完整切换时间线（旧状态 → 新状态 + 原因）。
+- 时间线和模型状态会**落盘持久化**（`STATUS_DB`，默认 `./data/status.json`）：Status UI 重启后自动恢复最近 24h 记录，不丢历史。
 - Status UI 定期拉取反代的 `/debug/modes` 校准：即使 UI 重启或某次上报丢失，页面也能与反代当前真实状态对齐。
 - **401 说明**：反代配了 `ZEN_AUTH_KEY` 时，校准请求也需要凭证。两种方式任选其一：
   - 给 Status UI 配 `STATUS_PROXY_AUTH=<同一个 ZEN_AUTH_KEY>`（Docker Compose 会自动从 `.env` 同步）；
@@ -25,7 +26,8 @@ STATUS_PROXY=http://127.0.0.1:8080 STATUS_PROXY_AUTH=<反代的 ZEN_AUTH_KEY> bu
 ZEN_STATUS_URL=http://127.0.0.1:8090 bun run src/cmd/zenproxy.ts
 ```
 
-Docker Compose 已内置 `status-ui` 服务（`http://<host>:8090`），在 `.env` 配置 `STATUS_*` 即可。
+Docker Compose 已内置 `status-ui` 服务（`http://<host>:8090`），在 `.env` 配置 `STATUS_*` 即可；
+Compose 会把 `status-ui-data` volume 挂到 `/data`，Status UI 重启后历史记录仍在。
 
 ## 环境变量
 
@@ -38,6 +40,7 @@ Docker Compose 已内置 `status-ui` 服务（`http://<host>:8090`），在 `.en
 | `STATUS_INTERVAL` | `15` | 与反代校准的间隔（秒） |
 | `STATUS_TIMEOUT` | `30` | 单次校准请求超时（秒） |
 | `STATUS_HISTORY` | `120` | 保留的切换事件条数（时间线） |
+| `STATUS_DB` | `./data/status.json` | 落盘持久化文件路径（Docker 固定 `/data/status.json`，挂 volume 重启不丢） |
 
 ## HTTP 接口
 
