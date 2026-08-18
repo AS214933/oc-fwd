@@ -261,8 +261,9 @@ export class UpstreamClient {
     if (this.keys.length === 0) return;
     this.probeTimer = setInterval(async () => {
       for (const model of this.fallback.keyedModels()) {
+        if (!this.fallback.probesActive(model)) continue;
         const ok = await this.probeAnonymous(model, this.cfg.noKeyProbeIntervalMs);
-        if (ok) this.fallback.trySwitchToNoKey(model);
+        this.fallback.takeProbeResult(model, ok);
       }
     }, this.cfg.noKeyProbeIntervalMs);
   }

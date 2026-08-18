@@ -23,6 +23,8 @@ export interface Config {
   apiKeys: string[];
   noKeyFailThreshold: number;
   noKeyProbeIntervalMs: number;
+  noKeyRecoveryHoldMs: number;
+  noKeyProbeConfirmations: number;
   statusURL: string;
   statusToken: string;
   forceChatCompletions: boolean;
@@ -140,6 +142,8 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
   const retryMaxBackoff = envFloat("ZEN_RETRY_MAX_BACKOFF_SECONDS", 30, env);
   const circuitCooldown = envFloat("ZEN_CIRCUIT_COOLDOWN_SECONDS", 30, env);
   const noKeyProbe = envFloat("ZEN_NO_KEY_PROBE_SECONDS", 3, env);
+  const noKeyHold = envFloat("ZEN_NO_KEY_RECOVERY_HOLD_SECONDS", 300, env);
+  const noKeyConfirm = envInt("ZEN_NO_KEY_RECOVERY_CONFIRMATIONS", 3, env);
   const upstreamTimeout = envFloat("ZEN_UPSTREAM_TIMEOUT_SECONDS", 600, env);
 
   if (!listen) throw new Error("LISTEN_ADDR cannot be empty");
@@ -163,6 +167,8 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     apiKeys: [],
     noKeyFailThreshold: envInt("ZEN_NO_KEY_FAIL_THRESHOLD", 3, env),
     noKeyProbeIntervalMs: noKeyProbe * 1000,
+    noKeyRecoveryHoldMs: noKeyHold * 1000,
+    noKeyProbeConfirmations: noKeyConfirm,
     statusURL: envStr("ZEN_STATUS_URL", "", env).replace(/\/+$/, ""),
     statusToken: envStr("ZEN_STATUS_TOKEN", "", env),
     forceChatCompletions: envBool("ZEN_FORCE_CHAT_COMPLETIONS", false, env),
@@ -194,6 +200,12 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     }
     if (cfg.noKeyProbeIntervalMs <= 0) {
       throw new Error(`invalid ZEN_NO_KEY_PROBE_SECONDS: must be > 0`);
+    }
+    if (cfg.noKeyRecoveryHoldMs < 0) {
+      throw new Error(`invalid ZEN_NO_KEY_RECOVERY_HOLD_SECONDS: must be >= 0`);
+    }
+    if (cfg.noKeyProbeConfirmations < 1) {
+      throw new Error(`invalid ZEN_NO_KEY_RECOVERY_CONFIRMATIONS: must be >= 1`);
     }
   }
   if (cfg.retryMax < 0 || cfg.retryBaseBackoffMs <= 0) {

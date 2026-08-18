@@ -40,7 +40,14 @@ export class Proxy {
   ) {
     this.reporter = cfg.statusURL ? new Reporter(cfg.statusURL, cfg.statusToken, log) : undefined;
     const circuit = new Circuit(cfg.circuitFailures, cfg.circuitCooldownMs);
-    const fallback = new FallbackState(cfg.noKeyFailThreshold, cfg.apiKeys.length > 0, log, this.reporter);
+    const fallback = new FallbackState(
+      cfg.noKeyFailThreshold,
+      cfg.apiKeys.length > 0,
+      log,
+      this.reporter,
+      cfg.noKeyRecoveryHoldMs,
+      cfg.noKeyProbeConfirmations,
+    );
     this.upstream = new UpstreamClient(cfg, log, fallback, circuit);
     this.sem = new Semaphore(cfg.maxConcurrency);
     this.reporter?.start();
