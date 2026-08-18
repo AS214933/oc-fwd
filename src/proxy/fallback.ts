@@ -73,7 +73,7 @@ export class FallbackState {
     this.log.info("upstream non-2xx, switching model to API-key mode", { model });
     st.keyMode = true;
     st.noKeyFails = 0;
-    this.emit(model, "anonymous", "keyed", "upstream_error", "non-2xx retries exhausted");
+    this.emit(model, "anonymous", "keyed", "upstream_error", "first non-2xx response");
     return true;
   }
 

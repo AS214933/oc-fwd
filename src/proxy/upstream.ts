@@ -143,16 +143,20 @@ export class UpstreamClient {
           return resp;
         }
         this.log.warn("upstream returned non-200", { status: resp.status });
+        // Fail fast to API-key mode: the first non-2xx (other than a 429
+        // rate limit, which the backoff ladder handles) switches this model
+        // so every later request goes straight to the keyed path instead of
+        // burning the full retry ladder anonymously first.
+        if (!hasKey && retryKeyed()) {
+          resp.destroy?.();
+          attempt = 0;
+          continue;
+        }
         const wait = this.backoff(attempt, retryAfterSeconds(resp));
         if (wait.ok) {
           resp.destroy?.();
           await sleep(wait.ms, signal);
           attempt++;
-          continue;
-        }
-        if (retryKeyed()) {
-          resp.destroy?.();
-          attempt = 0;
           continue;
         }
         this.fallback.reportKeyedResult(model, false, `HTTP ${resp.status} after retries`);

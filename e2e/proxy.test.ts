@@ -512,7 +512,8 @@ describe("retry + fallback", () => {
     expect(keyed.length).toBeGreaterThan(0);
   });
 
-  test("non-200 retry exhaustion falls back to API key", async () => {
+  test("first non-2xx switches model to API key immediately", async () => {
+    mock.clear();
     mock.setHandler(async (ctx) => {
       if (ctx.path === "/chat/completions") {
         if (!ctx.auth) return jsonResponse({ error: { message: "400" } }, 400);
@@ -520,7 +521,7 @@ describe("retry + fallback", () => {
       }
       return jsonResponse({});
     });
-    const cfg = await testConfig({ apiKeys: ["key-xyz"], retryMax: 1 });
+    const cfg = await testConfig({ apiKeys: ["key-xyz"], retryMax: 3 });
     const { url: u } = await startProxy(cfg);
     const res = await fetch(`${u}/v1/chat/completions`, {
       method: "POST",
@@ -528,8 +529,44 @@ describe("retry + fallback", () => {
       body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
     });
     expect(res.status).toBe(200);
+    // The anonymous attempt fails once, the model switches immediately, and
+    // the same request is retried with the key. The full retry ladder is NOT
+    // burned anonymously first.
+    const anonymous = mock.requests.filter((r) => !r.headers.get("Authorization") && r.path === "/chat/completions");
+    expect(anonymous.length).toBe(1);
     const keyed = mock.requests.filter((r) => r.headers.get("Authorization")?.includes("key-xyz"));
-    expect(keyed.length).toBeGreaterThan(0);
+    expect(keyed.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("subsequent requests go straight to API key after an anonymous non-2xx", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") {
+        if (!ctx.auth) return jsonResponse({ error: { message: "500" } }, 500);
+        return jsonResponse(chatCompletionJson(ctx.model, "keyed-later"));
+      }
+      return jsonResponse({});
+    });
+    const cfg = await testConfig({ apiKeys: ["key-later"], retryMax: 3 });
+    const { url: u } = await startProxy(cfg);
+    // First request triggers the fail-fast switch (anonymous 500 -> keyed 200).
+    const first = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(first.status).toBe(200);
+    // Second request must skip anonymous entirely and go straight to keyed.
+    mock.clear();
+    const second = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(second.status).toBe(200);
+    const secondCalls = mock.requests.filter((r) => r.path === "/chat/completions");
+    expect(secondCalls.length).toBe(1);
+    expect(secondCalls[0]?.headers.get("Authorization")).toContain("key-later");
   });
 
   test("concurrent 429s don't truncate in-flight retries when the circuit opens", async () => {
