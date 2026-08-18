@@ -42,7 +42,9 @@
 - **Responses 响应**：chat.completion → `resp_*` response 对象（message / function_call 输出条目）；流式输出 `response.created` → `response.output_text.delta` → `response.completed` 事件序列；
 - **Messages**：`system` / `messages` / `tools` / `max_tokens`；`tool_use` ↔ `tool_calls`、`tool_result` ↔ `role=tool`；响应 `stop_reason` ↔ `finish_reason`；流式输出 Anthropic 事件序列；
 - **Gemini**：`contents` / `systemInstruction` / `generationConfig` / `tools.functionDeclarations`；`functionCall` ↔ `tool_calls`、`functionResponse` ↔ `role=tool`；
-- 图片等非文本 content 目前会被忽略（纯文本转换）。
+- 图片等非文本 content 目前会被忽略（纯文本转换）；若模型本身不支持多模态，上游
+  返回的 `invalid_request_error`（如 `Model only supports text input`）会被代理
+  **原样回传且不重试、不触发 key 回退**——见 [retry-and-fallback.md](retry-and-fallback.md)。
 
 ## 兼容模式开关
 

@@ -568,6 +568,58 @@ describe("retry + fallback", () => {
     // must not cut the in-flight retry ladders short.
     expect(calls).toBe(24);
   });
+
+  test("multimodal unsupported error (400 invalid_request_error) is passed through without retry or key fallback", async () => {
+    mock.clear();
+    const multimodalBody = {
+      error: {
+        param: null,
+        type: "invalid_request_error",
+        code: "invalid_request_error",
+        message: "Error from provider (Console): Upstream request failed: [invalid_request_error] Failed to deserialize the JSON body into the target type: messages[0]: unknown variant `image_url`, expected `text` at line 1 column 265",
+      },
+    };
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") return jsonResponse(multimodalBody, 400);
+      return jsonResponse({});
+    });
+    const cfg = await testConfig({ apiKeys: ["key-zzz"], noKeyFailThreshold: 2 });
+    const { url: u } = await startProxy(cfg);
+    const res = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "deepseek-v4-flash-free",
+        messages: [{ role: "user", content: [{ type: "text", text: "describe" }, { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==" } }] }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual(multimodalBody);
+    const chatCalls = mock.requests.filter((r) => r.path === "/chat/completions");
+    expect(chatCalls.length).toBe(1); // no retries
+    expect(chatCalls.every((r) => !r.headers.get("Authorization"))).toBe(true); // no key fallback
+    expect(mock.requests.filter((r) => r.headers.get("Authorization")?.includes("key-zzz")).length).toBe(0);
+  });
+
+  test("generic 400 still follows the retry/fallback ladder (only multimodal errors bypass it)", async () => {
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") {
+        if (!ctx.auth) return jsonResponse({ error: { message: "400", type: "invalid_request_error" } }, 400);
+        return jsonResponse(chatCompletionJson(ctx.model, "keyed-after-generic-400"));
+      }
+      return jsonResponse({});
+    });
+    const cfg = await testConfig({ apiKeys: ["key-gen-400"], retryMax: 1 });
+    const { url: u } = await startProxy(cfg);
+    const res = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(200);
+    const keyed = mock.requests.filter((r) => r.headers.get("Authorization")?.includes("key-gen-400"));
+    expect(keyed.length).toBeGreaterThan(0);
+  });
 });
 
 describe("auth, models, aliases, force modes", () => {

@@ -15,6 +15,17 @@
 - 匿名 429 / 网络错误连续 `ZEN_NO_KEY_FAIL_THRESHOLD` 次也会累计切 key；
 - 只有带 key 重试也失败时，错误响应才最终到达客户端（不会无限重试）。
 
+### 例外：确定性 400（多模态不支持）原样回传，不重试
+
+如果上游返回 `invalid_request_error` 且错误内容指明请求包含模型不支持的多模态内容
+（如 `image_url` / `input_image` / `image` / `audio` 等未支持的 content type，
+典型消息：`Model only supports text input; received unsupported content type 'image_url'.`），
+说明是**客户端请求本身不合法**，重试（包括换成 API-key 重试）结果必然相同：
+
+- 立即把上游原始错误体原样回传（HTTP 状态码与 JSON 错误体保持上游一致）；
+- 不进入指数退避重试，也不会触发匿名 → API-key 回退；
+- 这类确定性错误不影响该模型的 429 熔断 / 匿名失败计数。
+
 ## 429 自动屏蔽重试
 
 - 429 优先按 `Retry-After` 等待，否则指数退避 + 抖动，最多重试 `ZEN_RETRY_MAX` 次；

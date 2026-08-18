@@ -134,6 +134,14 @@ export class UpstreamClient {
       }
 
       if (resp.status !== 200) {
+        if (await isPassthroughError(resp)) {
+          resp.destroy?.();
+          this.log.info("upstream returned a non-retryable request error, passing through", {
+            status: resp.status,
+            model,
+          });
+          return resp;
+        }
         this.log.warn("upstream returned non-200", { status: resp.status });
         const wait = this.backoff(attempt, retryAfterSeconds(resp));
         if (wait.ok) {
@@ -263,6 +271,59 @@ function modelFromBody(body: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Decide whether an upstream error is deterministic (retrying it, especially
+ * with a different auth mode, would produce the same failure). Zen answers
+ * unsupported multimodal (image/audio/input_image/unknown content type)
+ * requests with an invalid_request_error; those must be surfaced unchanged.
+ *
+ * The body is fully decoded here (which also drains the stream); callers must
+ * only invoke this on a response they have not streamed to the client yet.
+ */
+export async function isPassthroughError(resp: UpstreamResponse): Promise<boolean> {
+  if (resp.status < 400 || resp.status >= 500) return false;
+  let text: string;
+  try {
+    text = await readAllText(resp.body);
+  } catch {
+    return false;
+  }
+  const hay = text.toLowerCase();
+  const multimodal = [
+    "image_url",
+    "input_image",
+    "unsupported content type",
+    "unknown variant `image",
+    "image_url`",
+    "audio",
+    "content type 'image",
+    "content type 'audio",
+    "model only supports text",
+    "does not support image",
+    "does not support multimodal",
+    "not support multimodal",
+  ];
+  const isInvalidRequest = hay.includes("invalid_request_error") || hay.includes("invalid request error");
+  if (multimodal.some((k) => hay.includes(k)) && isInvalidRequest) {
+    resp.body = new Blob([text]).stream();
+    return true;
+  }
+  resp.body = new Blob([text]).stream();
+  return false;
+}
+
+async function readAllText(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) out += decoder.decode(value, { stream: true });
+  }
+  return out + decoder.decode();
 }
 
 function retryAfterSeconds(resp: UpstreamResponse): number {
