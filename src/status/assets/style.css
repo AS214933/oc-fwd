@@ -1,19 +1,9 @@
-/* ═══════════════════════════════════════════════════════
-   Zen Proxy Status – Statuspage.io-inspired theme
-   Color palette from DeepSeek status page:
-     green:  #10A37F   blue:    #207AB6
-     red:    #DE2F1B   yellow:  #F1C40F
-     orange: #B35E14   bg:      #F6FAFA
-     border: #E0E0E0   text:    #333333
-     muted:  #757575
-   ═══════════════════════════════════════════════════════ */
-
 :root {
-  --bg: #f6fafa;
+  --bg: #f5f7fa;
   --surface: #ffffff;
-  --border: #e0e0e0;
-  --text: #333333;
-  --muted: #757575;
+  --border: #e0e4ea;
+  --text: #1a1d21;
+  --muted: #757a82;
   --green: #10a37f;
   --green-bg: #e6f7f2;
   --blue: #207ab6;
@@ -21,9 +11,7 @@
   --red: #de2f1b;
   --red-bg: #fce8e6;
   --yellow: #f1c40f;
-  --yellow-bg: #fef9e7;
-  --orange: #b35e14;
-  --unknown-bg: #f4f5f7;
+  --unknown-bg: #eef0f3;
   --shadow: 0 1px 3px rgba(0,0,0,.06);
 }
 
@@ -35,327 +23,292 @@ body {
   font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Microsoft YaHei", Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
-  font-weight: 400;
 }
 
-/* ── Layout ── */
-.layout-content {
+.page-wrap {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
-.container {
-  flex: 1;
-  max-width: 680px;
-  width: 100%;
-  margin: 0 auto;
-  padding: 0 20px;
-}
-
 /* ── Masthead ── */
-.masthead-container.basic {
+.masthead {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  padding: 16px 24px;
+  padding: 18px 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
 }
-.masthead {
-  max-width: 680px;
-  margin: 0 auto;
+.masthead-inner {
   display: flex;
   align-items: center;
   gap: 14px;
 }
-.logo-container {
-  flex-shrink: 0;
-}
 .logo-mark {
-  width: 40px;
-  height: 40px;
+  width: 38px; height: 38px;
   border-radius: 10px;
   background: linear-gradient(135deg, var(--green), var(--blue));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-  color: #fff;
-  line-height: 1;
+  flex-shrink: 0;
 }
 .masthead-text h1 {
   font-size: 20px;
   font-weight: 600;
   line-height: 1.2;
-  color: var(--text);
+}
+.masthead-sub {
+  font-size: 13px;
+  color: var(--muted);
+}
+.meta-text {
+  font-size: 13px;
+  color: var(--muted);
 }
 
-/* ── Overall Status Banner ── */
-.page-status {
-  padding: 28px 0;
+/* ── Content ── */
+.content {
+  flex: 1;
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 28px 24px 48px;
+}
+
+/* ── Status Banner ── */
+.status-banner {
   display: flex;
   align-items: center;
   gap: 16px;
-  flex-wrap: wrap;
+  padding: 20px 24px;
+  border-radius: 10px;
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  transition: background .3s, border-color .3s;
 }
-.page-status .status {
-  display: inline-flex;
+.banner-icon {
+  flex-shrink: 0;
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 24px;
-  border-radius: 4px;
+  justify-content: center;
+}
+.banner-icon svg { display: none; }
+
+.banner-text h2 {
   font-size: 18px;
   font-weight: 600;
-  color: #fff;
-  transition: background .3s;
+  line-height: 1.3;
 }
-.page-status.status-none .status { background: var(--green); }
-.page-status.status-minor .status { background: var(--yellow); color: #333; }
-.page-status.status-major .status { background: var(--orange); }
-.page-status.status-critical .status { background: var(--red); }
-.page-status.status-unknown .status { background: var(--muted); }
-
-.last-updated-stamp {
-  color: var(--muted);
+.banner-sub {
+  margin-top: 2px;
   font-size: 13px;
+  opacity: .75;
 }
+
+/* Banner states */
+.status-banner.status-green {
+  background: var(--green-bg);
+  border-color: rgba(16,163,127,.3);
+}
+.status-banner.status-green .banner-icon {
+  background: var(--green);
+  color: #fff;
+}
+.status-banner.status-green .icon-check { display: block; }
+
+.status-banner.status-blue {
+  background: var(--blue-bg);
+  border-color: rgba(32,122,182,.3);
+}
+.status-banner.status-blue .banner-icon {
+  background: var(--blue);
+  color: #fff;
+}
+.status-banner.status-blue .icon-warn { display: block; }
+
+.status-banner.status-red {
+  background: var(--red-bg);
+  border-color: rgba(222,47,27,.3);
+}
+.status-banner.status-red .banner-icon {
+  background: var(--red);
+  color: #fff;
+}
+.status-banner.status-red .icon-error { display: block; }
+
+.status-banner.status-unknown .banner-icon {
+  background: var(--border);
+  color: var(--muted);
+}
+.status-banner.status-unknown .icon-unknown { display: block; }
 
 /* ── Components Section ── */
 .components-section {
   margin-bottom: 32px;
 }
 
-.components-uptime-link.history-footer-link {
-  color: var(--muted);
-  font-size: 13px;
-  margin-bottom: 8px;
-}
-
-.components-container.one-column {
+.components-list {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 0 0 4px 4px;
+  border-radius: 10px;
+  box-shadow: var(--shadow);
   overflow: hidden;
 }
 
-.component-container.border-color {
-  border-bottom: 1px solid var(--border);
-}
-.component-container.border-color:last-child {
-  border-bottom: none;
-}
-
-.component-inner-container {
-  display: flex;
-  flex-direction: column;
-  padding: 14px 20px;
-  transition: background .2s;
-  position: relative;
-}
-
-.component-inner-container .name {
-  font-weight: 500;
-  font-size: 14px;
-  color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  word-break: break-all;
-  margin-bottom: 6px;
-}
-
-.component-inner-container .component-status {
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 8px;
-}
-
-.component-inner-container .icon-indicator {
-  margin-right: 6px;
-  font-style: normal;
-}
-
-.component-inner-container .uptime-row {
+.component-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
-}
-
-.component-inner-container .detail-row {
-  display: flex;
-  gap: 16px;
-  font-size: 12px;
-  color: var(--muted);
-  margin-top: 6px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
-
-/* Component status colors */
-.component-inner-container.status-green .component-status,
-.component-inner-container.status-green .icon-indicator { color: var(--green); }
-.component-inner-container.status-blue .component-status,
-.component-inner-container.status-blue .icon-indicator { color: var(--blue); }
-.component-inner-container.status-red .component-status,
-.component-inner-container.status-red .icon-indicator { color: var(--red); }
-.component-inner-container.status-yellow .component-status,
-.component-inner-container.status-yellow .icon-indicator { color: var(--yellow); }
-.component-inner-container.status-gray .component-status,
-.component-inner-container.status-gray .icon-indicator { color: var(--muted); }
-
-/* ── SVG Uptime Bar (Statuspage 90-day style) ── */
-.uptime-svg {
-  width: 100%;
-  max-width: 500px;
-  height: 34px;
-  flex-shrink: 1;
+.component-row:last-child {
+  border-bottom: none;
+}
+.component-empty {
+  justify-content: center;
+  padding: 32px 20px;
 }
 
-.uptime-svg rect {
-  rx: 1;
-  ry: 1;
-  cursor: default;
-  outline: none;
-}
-.uptime-svg rect:focus {
-  stroke: #333;
-  stroke-width: 1;
+.component-name {
+  font-weight: 500;
+  font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+  flex: 1;
+  min-width: 120px;
 }
 
-.uptime-percent {
-  font-size: 13px;
-  color: var(--muted);
-  white-space: nowrap;
+.component-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
   flex-shrink: 0;
 }
 
-/* ── Uptime Legend ── */
-.uptime-legend {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--muted);
-  margin-top: 2px;
-}
-
-.uptime-legend .spacer {
-  flex: 1;
-  height: 1px;
-  background: var(--border);
-  opacity: .5;
-}
-
-/* ── Status Legend ── */
-.component-statuses-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  margin-top: 12px;
-  padding: 8px 0;
-}
-
-.legend-item {
+/* Status pill */
+.status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.status-pill .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-pill.pill-green { color: var(--green); background: var(--green-bg); }
+.status-pill.pill-green .dot { background: var(--green); }
+.status-pill.pill-blue { color: var(--blue); background: var(--blue-bg); }
+.status-pill.pill-blue .dot { background: var(--blue); }
+.status-pill.pill-red { color: var(--red); background: var(--red-bg); }
+.status-pill.pill-red .dot { background: var(--red); }
+.status-pill.pill-unknown { color: var(--muted); background: var(--unknown-bg); }
+.status-pill.pill-unknown .dot { background: var(--muted); }
+
+/* Uptime bar (like statuspage 90-day bar) */
+.uptime-bar {
+  display: flex;
+  gap: 2px;
+  height: 22px;
+  width: 220px;
+  flex-shrink: 0;
+}
+.uptime-bar i {
+  flex: 1;
+  border-radius: 2px;
+  background: var(--border);
+  opacity: .5;
+  transition: background .2s;
+}
+.uptime-bar i.g { background: var(--green); opacity: .85; }
+.uptime-bar i.b { background: var(--blue); opacity: .85; }
+.uptime-bar i.r { background: var(--red); opacity: .85; }
+
+/* Detail line under component name */
+.component-detail {
+  width: 100%;
+  display: flex;
+  gap: 20px;
   font-size: 12px;
   color: var(--muted);
+  padding: 0 0 2px;
+}
+.component-detail span {
+  white-space: nowrap;
 }
 
-.legend-item .icon-indicator {
-  font-style: normal;
-  font-size: 11px;
-}
-
-.legend-item.status-green .icon-indicator { color: var(--green); }
-.legend-item.status-blue .icon-indicator { color: var(--blue); }
-.legend-item.status-red .icon-indicator { color: var(--red); }
-.legend-item.status-yellow .icon-indicator { color: var(--yellow); }
-.legend-item.status-gray .icon-indicator { color: var(--muted); }
-
-/* ── Incidents / Past Activity ── */
-.incidents-list {
+/* ── Incidents ── */
+.incidents-section {
   margin-bottom: 32px;
 }
-
-.incidents-list .font-largest {
-  font-size: 20px;
+.section-title {
+  font-size: 16px;
   font-weight: 600;
-  color: var(--text);
-  text-decoration: none;
-  display: block;
   margin-bottom: 12px;
+  color: var(--text);
 }
-
-.incidents-list .no-link {
-  cursor: default;
-}
-
-.status-day {
+.incidents-list {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 0 0 4px 4px;
+  border-radius: 10px;
+  box-shadow: var(--shadow);
   overflow: hidden;
-  margin-bottom: 16px;
 }
-
-.status-day .date {
+.incidents-day-header {
   padding: 10px 20px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-}
-
-.status-day .no-incidents p {
-  padding: 14px 20px;
-  color: var(--muted);
   font-size: 13px;
-}
-
-.status-day .incident-container {
-  padding: 0 20px;
+  font-weight: 600;
+  color: var(--muted);
   border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }
-.status-day .incident-container:last-child {
+.incident-row {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.incident-row:last-child {
   border-bottom: none;
 }
-
-.status-day .incident-title {
-  padding: 12px 0 4px;
-  font-size: 14px;
-  font-weight: 600;
-}
-.status-day .incident-title a {
-  color: var(--text);
-  text-decoration: none;
-}
-.status-day .incident-title a:hover {
-  text-decoration: underline;
-}
-
-.status-day .incident-title.impact-critical { color: var(--red); }
-.status-day .incident-title.impact-major { color: var(--orange); }
-.status-day .incident-title.impact-minor { color: var(--yellow); }
-.status-day .incident-title.impact-maintenance { color: var(--blue); }
-
-.update {
-  padding: 8px 0 8px 14px;
-  border-left: 3px solid var(--border);
-  margin-bottom: 8px;
-  font-size: 13px;
-}
-
-.update strong {
-  font-weight: 600;
-}
-.update.investigating { border-left-color: var(--yellow); }
-.update.monitoring { border-left-color: var(--blue); }
-.update.resolved { border-left-color: var(--green); }
-.update.identified { border-left-color: var(--orange); }
-
-.update small {
-  display: block;
+.incident-time {
   color: var(--muted);
   font-size: 12px;
-  margin-top: 2px;
+  white-space: nowrap;
+  min-width: 70px;
+}
+.incident-model {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--unknown-bg);
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.incident-arrow {
+  color: var(--muted);
+}
+.incident-reason {
+  color: var(--muted);
+  font-size: 12px;
+  flex: 1;
+  min-width: 100px;
 }
 
 /* ── Footer ── */
@@ -366,26 +319,17 @@ body {
   font-size: 12px;
 }
 
-.powered-by {
-  color: var(--muted);
-}
-
 /* ── Utilities ── */
 .muted { color: var(--muted); }
 .hidden { display: none; }
-.font-large { font-size: 16px; }
-.font-small { font-size: 13px; }
-.font-regular { font-size: 14px; }
-.font-largest { font-size: 20px; }
-.color-secondary { color: var(--muted); }
 
-/* ── Responsive ── */
 @media (max-width: 640px) {
-  .masthead-container.basic { padding: 14px 16px; }
-  .container { padding: 0 14px; }
-  .page-status { padding: 20px 0; }
-  .page-status .status { font-size: 16px; padding: 8px 16px; }
-  .component-inner-container { padding: 12px 14px; }
-  .uptime-svg { height: 28px; }
-  .component-statuses-legend { gap: 10px; }
+  .masthead { padding: 14px 16px; }
+  .content { padding: 20px 14px 36px; }
+  .status-banner { padding: 16px; gap: 12px; }
+  .banner-text h2 { font-size: 16px; }
+  .component-row { padding: 12px 14px; }
+  .uptime-bar { width: 140px; height: 18px; }
+  .component-detail { flex-direction: column; gap: 4px; }
+  .incident-row { padding: 8px 14px; }
 }

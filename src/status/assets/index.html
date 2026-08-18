@@ -5,71 +5,56 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
   <title>Zen Proxy Status</title>
   <link rel="stylesheet" href="/assets/style.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%2310a37f'/><text x='16' y='22' text-anchor='middle' font-size='18' fill='white'>⚡</text></svg>">
 </head>
-<body class="status index">
-  <div class="layout-content status status-index">
-
-    <!-- Masthead -->
-    <div class="masthead-container basic">
-      <div class="masthead has-logo">
-        <div class="logo-container">
-          <div class="logo-mark" aria-hidden="true">⚡</div>
-        </div>
+<body>
+  <div class="page-wrap">
+    <header class="masthead">
+      <div class="masthead-inner">
+        <div class="logo-mark" aria-hidden="true"></div>
         <div class="masthead-text">
           <h1>Zen Proxy</h1>
+          <span class="masthead-sub">Status</span>
         </div>
       </div>
-    </div>
+      <div class="masthead-meta">
+        <span id="lastSync" class="meta-text">Waiting…</span>
+      </div>
+    </header>
 
-    <div class="container">
-
+    <main class="content">
       <!-- Overall status banner -->
-      <div id="statusBanner" class="page-status status-none">
-        <span class="status font-large" id="bannerTitle">Awaiting Data…</span>
-        <span class="last-updated-stamp font-small" id="lastSync"></span>
+      <div id="statusBanner" class="status-banner status-unknown">
+        <div class="banner-icon" aria-hidden="true">
+          <svg class="icon-check" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          <svg class="icon-warn" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <svg class="icon-error" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+          <svg class="icon-unknown" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        </div>
+        <div class="banner-text">
+          <h2 id="bannerTitle">Waiting for data…</h2>
+          <p id="bannerSub" class="banner-sub"></p>
+        </div>
       </div>
 
       <!-- Components section -->
-      <div class="components-section font-regular">
-        <div class="components-uptime-link history-footer-link" id="uptimeNote">
-          Uptime over the past <span id="uptimeDays">90</span> days.
-        </div>
-        <div class="components-container one-column" id="models">
-          <div class="component-container border-color">
-            <div class="component-inner-container status-green showcased" data-component-status="unknown">
-              <span class="name muted">No model data yet</span>
-            </div>
+      <section class="components-section">
+        <div id="models" class="components-list">
+          <div class="component-row component-empty">
+            <span class="component-name muted">No model data yet</span>
           </div>
         </div>
-        <div class="component-statuses-legend font-small">
-          <div class="legend-item status-green">
-            <span class="icon-indicator fa fa-check">✓</span> Operational
-          </div>
-          <div class="legend-item status-blue">
-            <span class="icon-indicator fa fa-wrench">●</span> Keyed (Degraded)
-          </div>
-          <div class="legend-item status-red">
-            <span class="icon-indicator fa fa-times">✕</span> Major Outage
-          </div>
-          <div class="legend-item status-gray">
-            <span class="icon-indicator">○</span> Unknown
-          </div>
-        </div>
-      </div>
+      </section>
 
-      <!-- Past Incidents / Activity -->
-      <div class="incidents-list format-expanded" id="incidentsSection">
-        <a class="font-largest no-link" id="past-incidents">Past Activity</a>
-        <div id="incidentsContent"></div>
-      </div>
+      <!-- Incidents / timeline section -->
+      <section id="incidentsSection" class="incidents-section hidden">
+        <h3 class="section-title">Recent Activity</h3>
+        <div id="timeline" class="incidents-list"></div>
+      </section>
+    </main>
 
-    </div>
-
-    <div class="page-footer border-color font-small">
-      <span class="color-secondary powered-by">Powered by Zen Proxy · Data refreshes every 5 seconds</span>
-    </div>
-
+    <footer class="page-footer">
+      <span class="muted">Powered by Zen Proxy · Data refreshes every 5 seconds</span>
+    </footer>
   </div>
   <script src="/assets/app.js"></script>
 </body>
