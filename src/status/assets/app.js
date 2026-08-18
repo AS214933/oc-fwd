@@ -118,9 +118,10 @@
   }
 
   // ── Uptime bar ────────────────────────────────────────────
-  // Render the last 24h as 48 half-hour segments (default), or the whole
-  // available timeline spread across the same number of segments.
-  function uptimeBar(model, timeline, nowMsVal, spanMs, segs) {
+  // Render the last 24h as 48 half-hour segments.
+  function uptimeBar(model, timeline, nowMsVal) {
+    var segs = 48;
+    var spanMs = H24;
     var evs = (timeline || []).filter(function (e) {
       return e.model === model && STATES[e.to];
     }).sort(function (a, b) { return a.at - b.at; });
@@ -146,31 +147,17 @@
   }
 
   // ── Rendering ─────────────────────────────────────────────
-  var state = { window: H24, history: [] };
-
-  function setActiveWindow(ms) {
-    state.window = ms;
-    var btns = document.querySelectorAll(".window-btn");
-    for (var i = 0; i < btns.length; i++) {
-      btns[i].classList.toggle("active", Number(btns[i].dataset.ms) === ms);
-    }
-    try { localStorage.setItem("zenproxy.status.window", String(ms)); } catch (e) {}
-  }
-
-  function windowLabel(ms) {
-    if (ms === H24) return "Last 24 hours";
-    return "All history";
-  }
+  var history = [];
 
   function render(snap) {
     // Track a local 24h history overlay: merge server timeline with whatever
     // we already stored so the bar keeps showing the last 24h even when the
-    // server only reports a short window.
+    // server only reports a shorter window.
     var serverEvs = (snap && snap.timeline) || [];
-    state.history = mergeEvents(state.history, serverEvs);
+    history = mergeEvents(history, serverEvs);
     var cutoff = nowMs() - H24;
-    state.history = state.history.filter(function (e) { return e.at >= cutoff; });
-    var timeline = state.history;
+    history = history.filter(function (e) { return e.at >= cutoff; });
+    var timeline = history;
 
     var overall = STATES[snap.overall] ? snap.overall : "unknown";
     var ov = OVERALL[overall] || OVERALL.unknown;
@@ -183,7 +170,7 @@
     el("bannerSub").textContent = ov.sub;
 
     // Meta
-    el("lastSync").textContent = "Last sync: " + (snap.last_reconcile ? new Date(snap.last_reconcile).toLocaleString() : "—") + " · Interval " + snap.interval + "s · Window: " + windowLabel(state.window);
+    el("lastSync").textContent = "Last sync: " + (snap.last_reconcile ? new Date(snap.last_reconcile).toLocaleString() : "—") + " · Interval " + snap.interval + "s";
 
     // Components
     var models = (snap && snap.models) || [];
@@ -191,11 +178,9 @@
     if (!models.length) {
       grid.innerHTML = '<div class="component-row component-empty"><span class="component-name muted">No model data yet — waiting for proxy report or /debug/modes</span></div>';
     } else {
-      var spanMs = state.window;
-      var segs = state.window === H24 ? 48 : 24;
       grid.innerHTML = models.map(function (m) {
         var st = STATES[m.state] || STATES.unknown;
-        var bar = uptimeBar(m.model, timeline, nowMs(), spanMs, segs);
+        var bar = uptimeBar(m.model, timeline, nowMs());
         var detail = "Duration " + ago(m.since) + " · Switches " + m.switches;
         var reason = reasonText(m.last_event);
         if (reason) detail += " · " + reason;
@@ -242,40 +227,10 @@
     }
   }
 
-  function savedWindow() {
-    try {
-      var raw = localStorage.getItem("zenproxy.status.window");
-      if (raw === "0") return 0;
-      if (raw === String(H24)) return H24;
-    } catch (e) {}
-    return null;
-  }
-
-  function applyWindowControls() {
-    var wrap = el("windowControls");
-    if (!wrap || wrap.dataset.bound) return;
-    wrap.dataset.bound = "1";
-    wrap.innerHTML =
-      '<button class="window-btn" data-ms="' + H24 + '">Last 24 hours</button>' +
-      '<button class="window-btn" data-ms="0">All history</button>';
-    var btns = wrap.querySelectorAll(".window-btn");
-    for (var i = 0; i < btns.length; i++) {
-      btns[i].addEventListener("click", function () {
-        setActiveWindow(Number(this.dataset.ms));
-        render(lastSnap);
-      });
-    }
-    var saved = savedWindow();
-    if (saved !== null) state.window = saved;
-    setActiveWindow(state.window);
-  }
-
-  var lastSnap = null;
   function poll() {
     fetch("/api/status", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
       .then(function (snap) {
-        lastSnap = snap;
         persistSnapshot(snap);
         render(snap);
       })
@@ -288,11 +243,8 @@
 
   // Boot: pick up any 24h history already stored locally so a reload shows
   // the last 24h immediately, before the first fetch returns.
-  var bootWin = savedWindow();
-  if (bootWin !== null) state.window = bootWin;
-  state.history = loadHistory();
-  render({ overall: "unknown", models: [], timeline: state.history, interval: 0, last_reconcile: 0 });
-  applyWindowControls();
+  history = loadHistory();
+  render({ overall: "unknown", models: [], timeline: history, interval: 0, last_reconcile: 0 });
   poll();
   setInterval(poll, 5000);
 })();
