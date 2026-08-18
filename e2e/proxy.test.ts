@@ -774,4 +774,40 @@ describe("health & debug", () => {
     const gpt = body.models.find((m) => m.model === "gpt-5.6-sol");
     expect(gpt?.state).toBe("anonymous");
   });
+
+  test("debug modes lists every configured model", async () => {
+    const cfg = await testConfig({ models: ["deepseek-v4-flash-free", "mimo-v2.5-free"], apiKeys: ["k1"] });
+    const { url: u } = await startProxy(cfg);
+    const modes = await fetch(`${u}/debug/modes`);
+    const body = (await modes.json()) as { models: Array<{ model: string; state: string }> };
+    const names = body.models.map((m) => m.model);
+    expect(names).toContain("deepseek-v4-flash-free");
+    expect(names).toContain("mimo-v2.5-free");
+  });
+
+  test("debug modes includes models seen outside ZEN_MODELS once requested", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") return jsonResponse(chatCompletionJson(ctx.model, "ok"));
+      return jsonResponse({});
+    });
+    const cfg = await testConfig({ models: ["deepseek-v4-flash-free"], apiKeys: ["k1"] });
+    const { url: u } = await startProxy(cfg);
+    // mimo-v2.5-free is NOT in ZEN_MODELS here, so it is rejected by the
+    // whitelist (resolveModel) and never reaches the upstream; the status UI
+    // therefore keeps showing exactly the configured model. The union with
+    // "seen" models matters when the proxy is configured with an empty
+    // ZEN_MODELS (no allowlist) - that case is covered by the failure-path
+    // fallback tests, and this test pins the allowlist behavior.
+    const res = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "mimo-v2.5-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(400);
+    const modes = await fetch(`${u}/debug/modes`);
+    const body = (await modes.json()) as { models: Array<{ model: string; state: string }> };
+    expect(body.models.map((m) => m.model)).toContain("deepseek-v4-flash-free");
+    expect(body.models.map((m) => m.model)).not.toContain("mimo-v2.5-free");
+  });
 });

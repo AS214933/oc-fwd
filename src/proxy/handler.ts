@@ -356,12 +356,20 @@ export class Proxy {
 
   private handleDebugModes(): Response {
     const states: Record<string, string> = {};
+    // Seed with every model that has ever been routed (anonymous successes
+    // included), then layer configured models and aliases on top so a model
+    // that is not in ZEN_MODELS still shows up once it has been used.
+    const seen = this.upstream.knownModels();
+    for (const model of seen) {
+      states[model] = this.fallbackState(model);
+    }
     if (this.cfg.apiKeys.length > 0) {
       for (const model of this.fallbackModels()) {
         states[model] = this.fallbackState(model);
       }
     }
-    const list = this.cfg.models.length > 0 ? this.cfg.models : catalogModelIds();
+    const list =
+      this.cfg.models.length > 0 ? [...this.cfg.models, ...seen] : catalogModelIds();
     for (const m of list) {
       if (!states[m]) states[m] = "anonymous";
     }

@@ -49,6 +49,10 @@ export class UpstreamClient {
     return this.fallback.keyedModels();
   }
 
+  knownModels(): string[] {
+    return this.fallback.knownModels();
+  }
+
   modelState(model: string): string {
     return this.fallback.state(model);
   }

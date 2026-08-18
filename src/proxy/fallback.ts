@@ -15,6 +15,9 @@ interface ModelFallback {
 
 export class FallbackState {
   private models = new Map<string, ModelFallback>();
+  /** Every model that has ever been routed through this proxy, so the status
+   *  UI can surface models beyond the configured ZEN_MODELS list. */
+  private seen = new Set<string>();
   constructor(
     private threshold: number,
     private keysEnabled: boolean,
@@ -42,8 +45,13 @@ export class FallbackState {
     return out;
   }
 
+  knownModels(): string[] {
+    return [...this.seen];
+  }
+
   recordNoKeyFailure(model: string): boolean {
     if (!this.keysEnabled) return false;
+    this.seen.add(model);
     let st = this.models.get(model);
     if (!st) {
       st = { keyMode: false, noKeyFails: 0, keyedFail: false };
@@ -64,6 +72,7 @@ export class FallbackState {
 
   forceSwitchToKey(model: string): boolean {
     if (!this.keysEnabled) return false;
+    this.seen.add(model);
     let st = this.models.get(model);
     if (!st) {
       st = { keyMode: false, noKeyFails: 0, keyedFail: false };
@@ -78,14 +87,20 @@ export class FallbackState {
   }
 
   recordNoKeySuccess(model: string) {
+    this.seen.add(model);
     if (!this.keysEnabled) return;
     const st = this.models.get(model);
-    if (!st || st.keyMode) return;
+    if (!st) {
+      this.models.set(model, { keyMode: false, noKeyFails: 0, keyedFail: false });
+      return;
+    }
+    if (st.keyMode) return;
     st.noKeyFails = 0;
   }
 
   trySwitchToNoKey(model: string): boolean {
     if (!this.keysEnabled) return false;
+    this.seen.add(model);
     const st = this.models.get(model);
     if (!st || !st.keyMode) return false;
     this.log.info("no-key upstream recovered, switching model back to anonymous mode", { model });
@@ -99,6 +114,7 @@ export class FallbackState {
 
   reportKeyedResult(model: string, ok: boolean, detail: string) {
     if (!this.keysEnabled) return;
+    this.seen.add(model);
     const st = this.models.get(model);
     if (!st || !st.keyMode) return;
     let from = "";
