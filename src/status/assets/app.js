@@ -9,10 +9,10 @@
   };
 
   var OVERALL = {
-    green:   { title: "All Systems Operational",  sub: "All models are running in anonymous mode." },
-    blue:    { title: "Partial System Degradation", sub: "Some models have switched to API key mode (anonymous unavailable)." },
-    red:     { title: "Major System Outage",       sub: "Some models have lost all connectivity." },
-    unknown: { title: "Awaiting Data…",            sub: "Waiting for the proxy to report model statuses." }
+    anonymous:    { title: "All Systems Operational",  sub: "All models are running in anonymous mode." },
+    keyed:        { title: "Partial System Degradation", sub: "Some models have switched to API key mode (anonymous unavailable)." },
+    keyed_failed: { title: "Major System Outage",       sub: "Some models have lost all connectivity." },
+    unknown:      { title: "Awaiting Data…",            sub: "Waiting for the proxy to report model statuses." }
   };
 
   var REASONS = {
@@ -97,9 +97,9 @@
   }
 
   function render(snap) {
-    var overall = snap.overall || "unknown";
+    var overall = STATES[snap.overall] ? snap.overall : "unknown";
     var ov = OVERALL[overall] || OVERALL.unknown;
-    var stClass = "status-" + overall;
+    var stClass = "status-" + (STATES[overall].cls || "unknown");
 
     // Banner
     var banner = el("statusBanner");

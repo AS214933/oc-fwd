@@ -74,8 +74,6 @@ export class Checker {
   ingest(ev: StateEvent) {
     if (ev.type !== undefined && ev.type !== "" && ev.type !== "state_change") return;
     if (!validState(ev.to)) return;
-    const at = ev.at ?? Date.now();
-    const entry: StateEvent = { ...ev, at };
     const view = this.models.get(ev.model) ?? {
       model: ev.model,
       state: "unknown" as State,
@@ -83,8 +81,12 @@ export class Checker {
       switches: 0,
       last_event: null,
     };
+    if (view.state === ev.to) return; // no actual switch: record nothing
+    const at = ev.at ?? Date.now();
+    const entry: StateEvent = { ...ev, at };
     view.state = ev.to as State;
-    if (view.state !== "unknown") view.switches++;
+    view.since = at;
+    if (ev.from) view.switches++; // only count transitions with an explicit source state
     view.last_event = entry;
     this.models.set(ev.model, view);
     this.timeline.push(entry);
@@ -127,9 +129,16 @@ export class Checker {
       if (!res.ok) return;
       const data = (await res.json()) as { models?: Array<{ model: string; state: string }> };
       for (const m of data.models ?? []) {
-        if (validState(m.state)) {
-          this.ingest({ model: m.model, to: m.state as State, reason: "reconcile", at: Date.now() });
-        }
+        if (!validState(m.state)) continue;
+        const known = this.models.get(m.model)?.state;
+        if (known === m.state) continue; // no switch since last reconcile: keep timeline clean
+        this.ingest({
+          model: m.model,
+          to: m.state as State,
+          from: known && known !== "unknown" ? known : undefined,
+          reason: known ? "reconciled" : "initial",
+          at: Date.now(),
+        });
       }
       this.lastReconcile = Date.now();
     } catch {
