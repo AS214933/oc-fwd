@@ -68,3 +68,65 @@ test("overall state drives banner mapping", () => {
   c.ingest({ model: "b", to: "keyed_failed" });
   expect(c.snapshot().overall).toBe("keyed_failed");
 });
+
+test("reconcile sends X-Status-Token and loads models", async () => {
+  const seen: Array<Record<string, string>> = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(req) {
+      seen.push({
+        authorization: req.headers.get("Authorization") ?? "",
+        statusToken: req.headers.get("X-Status-Token") ?? "",
+      });
+      return new Response(JSON.stringify({ models: [{ model: "m1", state: "anonymous" }] }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  const port = (server.port as unknown) as number;
+  const c = new Checker(quietLogger(), {
+    proxyUrl: `http://127.0.0.1:${port}`,
+    proxyAuth: "",
+    eventToken: "status-secret",
+    intervalMs: 1000,
+    timeoutMs: 1000,
+    history: 10,
+  });
+  await c["reconcile"]();
+  expect(seen.length).toBe(1);
+  expect(seen[0]?.statusToken).toBe("status-secret");
+  expect(seen[0]?.authorization).toBe("");
+  expect(c.snapshot().models.map((m) => m.model)).toEqual(["m1"]);
+  server.stop(true);
+});
+
+test("reconcile sends Bearer auth when proxyAuth is set", async () => {
+  const seen: Array<Record<string, string>> = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(req) {
+      seen.push({
+        authorization: req.headers.get("Authorization") ?? "",
+        statusToken: req.headers.get("X-Status-Token") ?? "",
+      });
+      return new Response(JSON.stringify({ models: [{ model: "m1", state: "anonymous" }] }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  const port = (server.port as unknown) as number;
+  const c = new Checker(quietLogger(), {
+    proxyUrl: `http://127.0.0.1:${port}`,
+    proxyAuth: "caller-secret",
+    eventToken: "status-secret",
+    intervalMs: 1000,
+    timeoutMs: 1000,
+    history: 10,
+  });
+  await c["reconcile"]();
+  expect(seen[0]?.authorization).toBe("Bearer caller-secret");
+  expect(seen[0]?.statusToken).toBe("status-secret");
+  server.stop(true);
+});

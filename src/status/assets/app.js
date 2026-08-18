@@ -168,7 +168,7 @@
           '<span class="component-status"><span class="icon-indicator">' + st.faIcon + '</span>' + st.label + '</span>' +
           '<div class="uptime-row">' +
           bar +
-          '<span class="uptime-percent">' + pct + '%</span>' +
+          '<span class="uptime-percent">' + (pct === "—" ? "—" : pct + "%") + '</span>' +
           '</div>' +
           '<div class="detail-row"><span>' + esc(detail) + '</span></div>' +
           '</div></div>';

@@ -45,6 +45,7 @@ export class Checker {
   private lastReconcile = 0;
   private proxyUrl: string;
   private proxyAuth: string;
+  private eventToken: string;
   private intervalMs: number;
   private timeoutMs: number;
   private history: number;
@@ -54,6 +55,7 @@ export class Checker {
     opts: {
       proxyUrl: string;
       proxyAuth: string;
+      eventToken?: string;
       intervalMs: number;
       timeoutMs: number;
       history: number;
@@ -61,6 +63,7 @@ export class Checker {
   ) {
     this.proxyUrl = opts.proxyUrl;
     this.proxyAuth = opts.proxyAuth;
+    this.eventToken = opts.eventToken ?? "";
     this.intervalMs = opts.intervalMs;
     this.timeoutMs = opts.timeoutMs;
     this.history = opts.history;
@@ -122,6 +125,7 @@ export class Checker {
     try {
       const headers: Record<string, string> = {};
       if (this.proxyAuth) headers.Authorization = `Bearer ${this.proxyAuth}`;
+      if (this.eventToken) headers["X-Status-Token"] = this.eventToken;
       const res = await fetch(`${this.proxyUrl}/debug/modes`, {
         headers,
         signal: AbortSignal.timeout(this.timeoutMs),

@@ -47,6 +47,7 @@ export function startStatusUI(cfg: StatusUIConfig, log: Logger) {
   const checker = new Checker(log, {
     proxyUrl: cfg.proxy,
     proxyAuth: cfg.proxyAuth,
+    eventToken: cfg.eventToken,
     intervalMs: cfg.intervalMs,
     timeoutMs: cfg.timeoutMs,
     history: cfg.history,
