@@ -3,6 +3,10 @@
  * proxy (POST /api/events), keeps the current per-model state plus a timeline
  * of every switch, and periodically reconciles with the proxy's /debug/modes
  * endpoint so restarts or missed deliveries cannot leave the page stale.
+ *
+ * The snapshot exposes the last 24 hours of timeline by default so the UI can
+ * render "Status over the last 24 hours" out of the box. Events older than
+ * the retention window are pruned from memory.
  */
 import { Logger } from "../log";
 
@@ -31,6 +35,8 @@ export interface Snapshot {
   last_event_at: number;
   last_reconcile: number;
   interval: number;
+  /** Timeline window in milliseconds (STATUS_HISTORY_SECONDS / 24h default). */
+  window_ms: number;
   models: ModelView[];
   timeline: StateEvent[];
 }
@@ -77,6 +83,7 @@ export class Checker {
   ingest(ev: StateEvent) {
     if (ev.type !== undefined && ev.type !== "" && ev.type !== "state_change") return;
     if (!validState(ev.to)) return;
+    const at = ev.at ?? Date.now();
     const view = this.models.get(ev.model) ?? {
       model: ev.model,
       state: "unknown" as State,
@@ -85,7 +92,6 @@ export class Checker {
       last_event: null,
     };
     if (view.state === ev.to) return; // no actual switch: record nothing
-    const at = ev.at ?? Date.now();
     const entry: StateEvent = { ...ev, at };
     view.state = ev.to as State;
     view.since = at;
@@ -93,6 +99,7 @@ export class Checker {
     view.last_event = entry;
     this.models.set(ev.model, view);
     this.timeline.push(entry);
+    this.sweep(at);
     if (this.timeline.length > this.history) this.timeline.shift();
   }
 
@@ -104,11 +111,24 @@ export class Checker {
       last_event_at: last?.at ?? 0,
       last_reconcile: this.lastReconcile,
       interval: Math.round(this.intervalMs / 1000),
+      window_ms: this.windowMs(),
       models: [...this.models.values()]
         .sort((a, b) => a.model.localeCompare(b.model))
         .map((m) => ({ ...m })),
       timeline: [...this.timeline],
     };
+  }
+
+  /** Timeline window: the configured history span in seconds if set,
+   *  otherwise the 24h default. */
+  private windowMs(): number {
+    if (this.history !== 120) return this.history * 1000;
+    return 24 * 60 * 60 * 1000;
+  }
+
+  private sweep(now: number) {
+    const keep = this.windowMs();
+    while (this.timeline.length > 0 && now - (this.timeline[0]?.at ?? 0) > keep) this.timeline.shift();
   }
 
   private overallState(): State {
@@ -132,19 +152,20 @@ export class Checker {
       });
       if (!res.ok) return;
       const data = (await res.json()) as { models?: Array<{ model: string; state: string }> };
+      const now = Date.now();
       for (const m of data.models ?? []) {
         if (!validState(m.state)) continue;
         const known = this.models.get(m.model)?.state;
-        if (known === m.state) continue; // no switch since last reconcile: keep timeline clean
+        if (known === m.state) continue;
         this.ingest({
           model: m.model,
           to: m.state as State,
           from: known && known !== "unknown" ? known : undefined,
           reason: known ? "reconciled" : "initial",
-          at: Date.now(),
+          at: now,
         });
       }
-      this.lastReconcile = Date.now();
+      this.lastReconcile = now;
     } catch {
       this.log.debug("reconcile failed");
     }
