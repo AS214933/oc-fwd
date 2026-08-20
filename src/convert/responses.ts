@@ -107,6 +107,7 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
     throw new Error("unsupported responses input");
   }
   if (out.messages.length === 0) throw new Error("responses input produced no messages");
+  normalizeToolCallSequence(out.messages);
   if (Array.isArray(req.tools)) {
     const tools = out.tools ?? [];
     for (const t of req.tools) {
@@ -125,6 +126,50 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
     if (tools.length > 0) out.tools = tools;
   }
   return out;
+}
+
+/**
+ * OpenAI Chat Completions requires every assistant message that declares
+ * tool_calls to be followed by a role="tool" message answering each
+ * call_id. Responses API clients often send a function_call entry without
+ * its function_call_output in the same request (results arrive in the next
+ * turn, or a parallel tool set is only partially answered), which would
+ * otherwise be rejected upstream with
+ * "assistant message with 'tool_calls' must be followed by tool messages".
+ * Fill in empty tool responses so the sequence stays valid; already-paired
+ * calls are left untouched.
+ */
+function normalizeToolCallSequence(messages: ChatMessage[]) {
+  // Pass 1: every tool_call_id that is answered by a role="tool" message
+  // anywhere in the request.
+  const answered = new Set<string>();
+  for (const msg of messages) {
+    if (msg && msg.role === "tool" && msg.tool_call_id) answered.add(msg.tool_call_id);
+  }
+  // Pass 2: assistant tool_calls whose id is NOT answered are missing their
+  // result; remember the assistant message index so the empty tool message
+  // can be inserted right after it (chat requires tool_calls -> tool adjacency).
+  const pending = new Map<string, number>();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg || msg.role !== "assistant" || !msg.tool_calls) continue;
+    for (const tc of msg.tool_calls) {
+      if (tc.id && !answered.has(tc.id) && !pending.has(tc.id)) pending.set(tc.id, i);
+    }
+  }
+  if (pending.size === 0) return;
+  // Pass 3: insert the missing tool messages, back-to-front so indices stay
+  // valid while splicing.
+  const inserts: Array<{ at: number; msg: ChatMessage }> = [];
+  for (const [callId, ownerIdx] of pending) {
+    inserts.push({ at: ownerIdx + 1, msg: { role: "tool", tool_call_id: callId, content: "" } });
+  }
+  inserts.sort((a, b) => a.at - b.at);
+  for (let k = inserts.length - 1; k >= 0; k--) {
+    const ins = inserts[k];
+    if (!ins) continue;
+    messages.splice(ins.at, 0, ins.msg);
+  }
 }
 
 /** Convert a canonical Chat Completions request to a Responses request body. */

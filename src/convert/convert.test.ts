@@ -26,6 +26,50 @@ async function* scanEvents(events: SseEvent[]): AsyncGenerator<SseEvent> {
 }
 
 describe("responses -> chat request", () => {
+  test("fills missing tool result so chat sequence stays valid", () => {
+    const req = responsesToChatRequest({
+      model: "gpt-5.5",
+      input: [
+        { type: "function_call", call_id: "call_1", name: "search", arguments: "{}" },
+      ],
+    });
+    expect(req.messages).toEqual([
+      { role: "assistant", content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "call_1", content: "" },
+    ]);
+  });
+
+  test("leaves paired call+output untouched", () => {
+    const req = responsesToChatRequest({
+      model: "gpt-5.5",
+      input: [
+        { type: "function_call", call_id: "call_1", name: "search", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_1", output: "results" },
+      ],
+    });
+    expect(req.messages).toEqual([
+      { role: "assistant", content: "", tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "call_1", content: "results" },
+    ]);
+  });
+
+  test("fills only the missing parallel call result", () => {
+    const req = responsesToChatRequest({
+      model: "gpt-5.5",
+      input: [
+        { type: "function_call", call_id: "call_a", name: "search", arguments: "{}" },
+        { type: "function_call", call_id: "call_b", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_a", output: "A-result" },
+      ],
+    });
+    const answered = req.messages.filter((m) => m.role === "tool" && m.content !== "");
+    const empty = req.messages.filter((m) => m.role === "tool" && m.content === "");
+    expect(answered).toHaveLength(1);
+    expect(answered[0]?.tool_call_id).toBe("call_a");
+    expect(empty).toHaveLength(1);
+    expect(empty[0]?.tool_call_id).toBe("call_b");
+  });
+
   test("instructions + input items + tools", () => {
     const req = responsesToChatRequest({
       model: "gpt-5.4",
