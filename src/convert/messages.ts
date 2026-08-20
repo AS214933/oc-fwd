@@ -8,6 +8,8 @@ import { chatRole, contentToString } from "./types";
 interface AnthropicBlock {
   type?: string;
   text?: string;
+  thinking?: string;
+  signature?: string;
   id?: string;
   name?: string;
   input?: unknown;
@@ -31,7 +33,7 @@ export function parseMessagesRequest(raw: Record<string, unknown>): MessagesRequ
   const req: MessagesRequest = { model: raw.model, messages: [] };
   if (typeof raw.system === "string") req.system = raw.system;
   if (Array.isArray(raw.messages)) req.messages = raw.messages as MessagesRequest["messages"];
-  for (const key of ["max_tokens", "temperature", "stream", "tools", "stop_sequences", "top_p"]) {
+  for (const key of ["max_tokens", "temperature", "stream", "tools", "stop_sequences", "top_p", "thinking"]) {
     if (raw[key] !== undefined) (req as Record<string, unknown>)[key] = raw[key];
   }
   return req;
@@ -42,6 +44,7 @@ export function messagesToChatRequest(req: MessagesRequest): ChatRequest {
   const out: ChatRequest = { model: req.model, messages: [], stream: req.stream === true };
   if (req.temperature !== undefined) out.temperature = req.temperature;
   if (typeof req.max_tokens === "number" && req.max_tokens > 0) out.max_tokens = req.max_tokens;
+  if (req.thinking !== undefined) out.thinking = req.thinking;
   if (typeof req.system === "string" && req.system !== "") {
     out.messages.push({ role: "system", content: req.system });
   }
@@ -57,6 +60,9 @@ export function messagesToChatRequest(req: MessagesRequest): ChatRequest {
       .filter((b) => b.type === "text" && typeof b.text === "string")
       .map((b) => b.text as string)
       .join("");
+    const thinking = blocks.filter(
+      (b) => b.type === "thinking" && typeof b.thinking === "string" && b.thinking !== "",
+    );
     const toolUses = blocks.filter((b) => b.type === "tool_use");
     const toolResults = blocks.filter((b) => b.type === "tool_result");
     if (toolResults.length > 0) {
@@ -70,6 +76,11 @@ export function messagesToChatRequest(req: MessagesRequest): ChatRequest {
       continue;
     }
     const msg: ChatMessage = { role, content: text };
+    if (thinking.length > 0) {
+      msg.reasoning_content = thinking.map((b) => b.thinking as string).join("");
+      const signature = thinking[thinking.length - 1]?.signature;
+      if (typeof signature === "string" && signature !== "") msg.reasoning_signature = signature;
+    }
     if (toolUses.length > 0) {
       msg.tool_calls = toolUses.map((tu, i) => ({
         id: tu.id ?? `toolu_${i + 1}`,
@@ -77,7 +88,7 @@ export function messagesToChatRequest(req: MessagesRequest): ChatRequest {
         function: { name: tu.name ?? "", arguments: JSON.stringify(tu.input ?? {}) },
       }));
     }
-    if (text !== "" || msg.tool_calls) out.messages.push(msg);
+    if (text !== "" || msg.tool_calls || msg.reasoning_content) out.messages.push(msg);
   }
   if (out.messages.length === 0) throw new Error("messages body produced no messages");
   if (Array.isArray(req.tools)) {
@@ -112,6 +123,13 @@ export function chatToMessagesRequest(req: ChatRequest): Record<string, unknown>
       continue;
     }
     const content: AnthropicBlock[] = [];
+    if (msg.reasoning_content) {
+      content.push({
+        type: "thinking",
+        thinking: msg.reasoning_content,
+        ...(msg.reasoning_signature ? { signature: msg.reasoning_signature } : {}),
+      });
+    }
     if (msg.content) content.push({ type: "text", text: msg.content });
     for (const tc of msg.tool_calls ?? []) {
       let input: unknown = {};
@@ -128,6 +146,7 @@ export function chatToMessagesRequest(req: ChatRequest): Record<string, unknown>
   const out: Record<string, unknown> = { model: req.model, messages };
   if (system.length > 0) out.system = system.join("\n\n");
   if (req.stream === true) out.stream = true;
+  if (req.thinking !== undefined) out.thinking = req.thinking;
   if (req.temperature !== undefined) out.temperature = req.temperature;
   if (req.max_tokens !== undefined) out.max_tokens = req.max_tokens;
   if (req.tools?.length) {
@@ -145,6 +164,8 @@ export function parseMessagesResponse(data: Record<string, unknown>): ChatComple
   const content = Array.isArray(data.content) ? (data.content as AnthropicBlock[]) : [];
   const message: ChatMessage = { role: "assistant", content: "" };
   const toolCalls: NonNullable<ChatMessage["tool_calls"]> = [];
+  let thinking = "";
+  let thinkingSignature: string | undefined;
   for (const block of content) {
     if (block.type === "text" && typeof block.text === "string") {
       message.content = (message.content ? message.content + block.text : block.text) as string;
@@ -154,9 +175,14 @@ export function parseMessagesResponse(data: Record<string, unknown>): ChatComple
         type: "function",
         function: { name: block.name ?? "", arguments: JSON.stringify(block.input ?? {}) },
       });
+    } else if (block.type === "thinking" && typeof block.thinking === "string") {
+      thinking += block.thinking;
+      if (typeof block.signature === "string" && block.signature !== "") thinkingSignature = block.signature;
     }
   }
   if (toolCalls.length > 0) message.tool_calls = toolCalls;
+  if (thinking !== "") message.reasoning_content = thinking;
+  if (thinkingSignature !== undefined) message.reasoning_signature = thinkingSignature;
   const stop = typeof data.stop_reason === "string" ? data.stop_reason : "end_turn";
   const usage = (data.usage ?? {}) as Record<string, unknown>;
   return {
@@ -183,6 +209,13 @@ export function parseMessagesResponse(data: Record<string, unknown>): ChatComple
 export function renderChatCompletionAsMessages(completion: ChatCompletion): Record<string, unknown> {
   const msg = completion.choices[0]?.message;
   const content: AnthropicBlock[] = [];
+  if (msg?.reasoning_content) {
+    content.push({
+      type: "thinking",
+      thinking: msg.reasoning_content,
+      ...(msg.reasoning_signature ? { signature: msg.reasoning_signature } : {}),
+    });
+  }
   if (msg?.content) content.push({ type: "text", text: msg.content });
   for (const tc of msg?.tool_calls ?? []) {
     let input: unknown = {};

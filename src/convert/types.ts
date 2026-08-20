@@ -13,8 +13,13 @@ export interface ChatToolCall {
 export interface ChatMessage {
   role: string;
   content: string;
-  /** DeepSeek thinking-mode state that must accompany assistant tool calls. */
+  /** Thinking-mode state relayed across protocols (DeepSeek reasoning_content,
+   *  Responses reasoning_text, Anthropic thinking, Gemini thought parts). */
   reasoning_content?: string;
+  /** Anthropic extended-thinking signature, preserved so a claude<->claude
+   *  round trip can pass thinking blocks back to the API verbatim. Undefined
+   *  when the text was synthesized from another protocol. */
+  reasoning_signature?: string;
   tool_call_id?: string;
   tool_calls?: ChatToolCall[];
 }
@@ -118,7 +123,7 @@ export interface ChatChunk {
   created: number;
   choices: Array<{
     index: number;
-    delta: { role?: string; content?: string; reasoning_content?: string; tool_calls?: ChatChunkToolCall[] };
+    delta: { role?: string; content?: string; reasoning_content?: string; reasoning_signature?: string; tool_calls?: ChatChunkToolCall[] };
     finish_reason?: string;
   }>;
   usage?: ChatUsage;

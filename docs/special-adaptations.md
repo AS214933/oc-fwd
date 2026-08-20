@@ -68,7 +68,30 @@ Responses、Chat、Messages 和 Gemini 出站统一生效，保证未知内置�
 `function_call_output` 不在同一请求（结果在下一轮携带，或并行调用缺结果）。
 **适配**：与 2a 同一套归一化——转换完成后补空 `tool` 消息，保证上游 chat 序列合法。
 
-## 3. 传输层优化（不影响随机 socks5 出口）
+## 3. 思考内容跨协议回传
+
+zenproxy 把各协议的"思考内容"归一化为 canonical 的 `reasoning_content`
+（chat 消息 / `ChatChunk.delta` 上的统一字段），并在所有协议边界双向还原。
+这样任意客户端协议 × 任意模型家族都能把思考过程带回给客户端，也不会在不同
+协议之间丢失或错位。
+
+| 协议 | 入站 → canonical | canonical → 出站 |
+| --- | --- | --- |
+| Chat（deepseek 等） | `message.reasoning_content` / `delta.reasoning_content` | 同上（DeepSeek 必须回传，见 1b；其他 chat 模型不发送该字段） |
+| Responses | `type:"reasoning"` 条目（含流式 `response.reasoning_text.delta`） | `reasoning` 输出条目 / `response.reasoning_text.delta` |
+| Anthropic Messages | `type:"thinking"` 块（流式 `thinking_delta`） | `type:"thinking"` 块（流式 `content_block_start` / `thinking_delta` / `content_block_stop`） |
+| Gemini | `part.thought === true` 的文本部分 | `{ text, thought: true }` 部分 |
+
+- Anthropic 的 thinking `signature` 会随 canonical 往返保留（`reasoning_signature`），
+  claude→claude 多轮续聊仍能按原样把 thinking 块（含签名）回传给上游；跨协议
+  合成（deepseek / gemini / gpt 思考 → claude 上游）的 thinking 块没有签名。
+- `thinking`（Anthropic）与 `reasoning`（Responses）请求参数只在同类协议往返时
+  透传（messages→messages、responses→responses）；发往 Chat Completions 上游前
+  会被剥除，避免未知字段被上游拒绝。
+- Gemini 的思考部分不会混入正文：`thought: true` 的部分进入 `reasoning_content`，
+  普通文本仍走 `content`。
+
+## 4. 传输层优化（不影响随机 socks5 出口）
 
 - **TLS 会话复用**：每次请求仍新建 socks5 隧道（随机出口不变），但跨连接复用
   与出口 IP 无关的 TLS ticket，握手降为 1 个 RTT。
@@ -79,7 +102,7 @@ Responses、Chat、Messages 和 Gemini 出站统一生效，保证未知内置�
 
 详见 [docs/networking.md](networking.md)。
 
-## 4. 日志与观测
+## 5. 日志与观测
 
 - 任何非 200 上游响应都会把**解析后的错误体**打进日志：
   `[WARN] upstream returned non-200 {"status":...,"model":...,"error_type":...,"error_code":...,"error_message":...,"body":"..."}`。

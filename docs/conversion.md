@@ -43,6 +43,7 @@
 - **Responses 响应**：chat.completion → `resp_*` response 对象（message / function_call 输出条目）；流式输出 `response.created` → `response.output_text.delta` → `response.completed` 事件序列；
 - **Messages**：`system` / `messages` / `tools` / `max_tokens`；`tool_use` ↔ `tool_calls`、`tool_result` ↔ `role=tool`；响应 `stop_reason` ↔ `finish_reason`；流式输出 Anthropic 事件序列；
 - **Gemini**：`contents` / `systemInstruction` / `generationConfig` / `tools.functionDeclarations`；`functionCall` ↔ `tool_calls`、`functionResponse` ↔ `role=tool`；
+- **思考内容**：canonical 的 `reasoning_content` ↔ Responses `reasoning` 条目（含流式 `reasoning_text.delta`）、Anthropic `thinking` 块（含流式 `thinking_delta`，并保留 `signature` 供 claude→claude 原样回传）、Gemini `thought: true` 部分、DeepSeek chat `reasoning_content`。非流式与流式都覆盖，详见 [special-adaptations.md](special-adaptations.md)；
 - **Tools**：所有入站协议统一只保留标准 `function` 工具；Codex Responses 的 `web_search`、`computer`、`image_generation`、`mcp`、`custom` 等工具以及指向它们的 `tool_choice` 不会发给 Zen，避免 Console 对不支持类型返回 400；
 - 图片等非文本 content 目前会被忽略（纯文本转换）；若模型本身不支持多模态，上游
   返回的 `invalid_request_error`（如 `Model only supports text input`）会被代理

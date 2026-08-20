@@ -148,6 +148,17 @@ export async function* responsesToChatChunks(events: AsyncGenerator<SseEvent>): 
         if (text) yield makeChunk(id, model, created, [{ index: 0, delta: { content: text } }]);
         break;
       }
+      case "response.reasoning_text.delta": {
+        const text = typeof payload.delta === "string" ? payload.delta : "";
+        if (text) {
+          if (!sentRole) {
+            sentRole = true;
+            yield makeChunk(id, model, created, [{ index: 0, delta: { role: "assistant" } }]);
+          }
+          yield makeChunk(id, model, created, [{ index: 0, delta: { reasoning_content: text } }]);
+        }
+        break;
+      }
       case "response.function_call_arguments.delta": {
         const idx = typeof payload.output_index === "number" ? payload.output_index : 0;
         const delta = typeof payload.delta === "string" ? payload.delta : "";
@@ -253,6 +264,8 @@ export async function* messagesToChatChunks(events: AsyncGenerator<SseEvent>): A
         const idx = typeof payload.index === "number" ? payload.index : 0;
         if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text) {
           yield makeChunk(id, model, created, [{ index: 0, delta: { content: delta.text } }]);
+        } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string" && delta.thinking) {
+          yield makeChunk(id, model, created, [{ index: 0, delta: { reasoning_content: delta.thinking } }]);
         } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string" && delta.partial_json) {
           yield makeChunk(id, model, created, [
             { index: 0, delta: { tool_calls: [{ index: idx, function: { arguments: delta.partial_json } }] } },
@@ -260,8 +273,13 @@ export async function* messagesToChatChunks(events: AsyncGenerator<SseEvent>): A
         }
         break;
       }
-      case "content_block_stop":
+      case "content_block_stop": {
+        const block = (payload.content_block ?? {}) as Record<string, unknown>;
+        if (block.type === "thinking" && typeof block.signature === "string" && block.signature) {
+          yield makeChunk(id, model, created, [{ index: 0, delta: { reasoning_signature: block.signature } }]);
+        }
         break;
+      }
       case "message_delta": {
         const d = (payload.delta ?? {}) as Record<string, unknown>;
         if (typeof d.stop_reason === "string") stopReason = d.stop_reason;
@@ -323,7 +341,11 @@ export async function* geminiToChatChunks(events: AsyncGenerator<SseEvent>): Asy
     const chunk = parseGeminiChunk(payload);
     for (const part of chunk.parts) {
       if (typeof part.text === "string" && part.text) {
-        yield makeChunk(id, model, created, [{ index: 0, delta: { content: part.text } }]);
+        if (part.thought === true) {
+          yield makeChunk(id, model, created, [{ index: 0, delta: { reasoning_content: part.text } }]);
+        } else {
+          yield makeChunk(id, model, created, [{ index: 0, delta: { content: part.text } }]);
+        }
       }
       if (part.functionCall) {
         const idx = toolIdx++;
@@ -556,6 +578,9 @@ export async function* chatChunksToMessages(chunks: AsyncGenerator<ChatChunk>): 
   let model = "";
   let nextBlock = 0;
   let textBlock = -1;
+  let thinkingBlock = -1;
+  let thinkingText = "";
+  let thinkingSignature = "";
   const toolBlocks = new Map<number, { block: number; id: string; name: string }>();
   let usage: ChatUsage | undefined;
 
@@ -566,7 +591,16 @@ export async function* chatChunksToMessages(chunks: AsyncGenerator<ChatChunk>): 
 
   const stopBlocks = (): SseEvent[] => {
     const out: SseEvent[] = [];
-    for (let i = 0; i < nextBlock; i++) out.push(ev("content_block_stop", { index: i }));
+    for (let i = 0; i < nextBlock; i++) {
+      if (i === thinkingBlock && thinkingSignature) {
+        out.push(ev("content_block_stop", {
+          index: i,
+          content_block: { type: "thinking", thinking: thinkingText, signature: thinkingSignature },
+        }));
+      } else {
+        out.push(ev("content_block_stop", { index: i }));
+      }
+    }
     return out;
   };
 
@@ -585,6 +619,15 @@ export async function* chatChunksToMessages(chunks: AsyncGenerator<ChatChunk>): 
     const choice = chunk.choices[0];
     if (!choice) continue;
     const d = choice.delta;
+    if (d.reasoning_content) {
+      if (thinkingBlock < 0) {
+        thinkingBlock = nextBlock++;
+        yield ev("content_block_start", { index: thinkingBlock, content_block: { type: "thinking", thinking: "" } });
+      }
+      thinkingText += d.reasoning_content;
+      yield ev("content_block_delta", { index: thinkingBlock, delta: { type: "thinking_delta", thinking: d.reasoning_content } });
+    }
+    if (d.reasoning_signature) thinkingSignature = d.reasoning_signature;
     if (d.content) {
       if (textBlock < 0) {
         textBlock = nextBlock++;
@@ -657,6 +700,12 @@ export async function* chatChunksToGemini(chunks: AsyncGenerator<ChatChunk>): As
     const choice = chunk.choices[0];
     if (!choice) continue;
     const d = choice.delta;
+    if (d.reasoning_content) {
+      started = true;
+      yield { event: undefined, data: JSON.stringify({
+        candidates: [{ content: { role: "model", parts: [{ text: d.reasoning_content, thought: true }] } }],
+      }) };
+    }
     if (d.content) {
       started = true;
       yield { event: undefined, data: JSON.stringify({
@@ -784,15 +833,33 @@ export function renderMessagesEventsFromCompletion(completion: ChatCompletion): 
       },
     }),
   });
+  let nextBlock = 0;
+  if (msg?.reasoning_content) {
+    events.push({ event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }) });
+    events.push({ event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: msg.reasoning_content } }) });
+    events.push({
+      event: "content_block_stop",
+      data: JSON.stringify({
+        type: "content_block_stop",
+        index: 0,
+        ...(msg.reasoning_signature
+          ? { content_block: { type: "thinking", thinking: msg.reasoning_content, signature: msg.reasoning_signature } }
+          : {}),
+      }),
+    });
+    nextBlock = 1;
+  }
   if (msg?.content) {
-    events.push({ event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }) });
-    events.push({ event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: msg.content } }) });
-    events.push({ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) });
+    events.push({ event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index: nextBlock, content_block: { type: "text", text: "" } }) });
+    events.push({ event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index: nextBlock, delta: { type: "text_delta", text: msg.content } }) });
+    events.push({ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: nextBlock }) });
+    nextBlock++;
   }
   (msg?.tool_calls ?? []).forEach((tc, i) => {
-    events.push({ event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index: i + 1, content_block: { type: "tool_use", id: tc.id, name: tc.function.name, input: {} } }) });
-    events.push({ event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index: i + 1, delta: { type: "input_json_delta", partial_json: tc.function.arguments } }) });
-    events.push({ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: i + 1 }) });
+    const index = nextBlock + i;
+    events.push({ event: "content_block_start", data: JSON.stringify({ type: "content_block_start", index, content_block: { type: "tool_use", id: tc.id, name: tc.function.name, input: {} } }) });
+    events.push({ event: "content_block_delta", data: JSON.stringify({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: tc.function.arguments } }) });
+    events.push({ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index }) });
   });
   events.push({
     event: "message_delta",
@@ -810,6 +877,7 @@ export function renderMessagesEventsFromCompletion(completion: ChatCompletion): 
 export function renderGeminiEventFromCompletion(completion: ChatCompletion): SseEvent {
   const msg = completion.choices[0]?.message;
   const parts: Array<Record<string, unknown>> = [];
+  if (msg?.reasoning_content) parts.push({ text: msg.reasoning_content, thought: true });
   if (msg?.content) parts.push({ text: msg.content });
   for (const tc of msg?.tool_calls ?? []) {
     let args: unknown = {};

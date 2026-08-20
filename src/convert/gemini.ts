@@ -7,6 +7,8 @@ import type { ChatCompletion, ChatMessage, ChatRequest } from "./types";
 
 interface GeminiPart {
   text?: string;
+  /** Gemini marks model-side thinking parts with thought:true. */
+  thought?: boolean;
   functionCall?: { name?: string; args?: unknown };
   functionResponse?: { name?: string; response?: unknown };
 }
@@ -55,6 +57,7 @@ export function chatToGeminiRequest(req: ChatRequest): Record<string, unknown> {
       continue;
     }
     const parts: GeminiPart[] = [];
+    if (msg.reasoning_content) parts.push({ text: msg.reasoning_content, thought: true });
     if (msg.content) parts.push({ text: msg.content });
     for (const tc of msg.tool_calls ?? []) {
       callNames.set(tc.id, tc.function.name);
@@ -103,8 +106,12 @@ export function parseGeminiResponse(data: GeminiResponseShape): ChatCompletion {
   const parts = candidate?.content?.parts ?? [];
   const message: ChatMessage = { role: "assistant", content: "" };
   const toolCalls: NonNullable<ChatMessage["tool_calls"]> = [];
+  let reasoning = "";
   for (const part of parts) {
-    if (typeof part.text === "string") message.content += part.text;
+    if (typeof part.text === "string") {
+      if (part.thought === true) reasoning += part.text;
+      else message.content += part.text;
+    }
     if (part.functionCall) {
       toolCalls.push({
         id: `call_${toolCalls.length + 1}`,
@@ -117,6 +124,7 @@ export function parseGeminiResponse(data: GeminiResponseShape): ChatCompletion {
     }
   }
   if (toolCalls.length > 0) message.tool_calls = toolCalls;
+  if (reasoning !== "") message.reasoning_content = reasoning;
   const usage = data.usageMetadata;
   return {
     id: "chatcmpl_gemini",

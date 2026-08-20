@@ -57,6 +57,7 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
   let pendingReasoning = "";
   if (req.temperature !== undefined) out.temperature = req.temperature;
   if (req.max_output_tokens !== undefined) out.max_tokens = req.max_output_tokens;
+  if (req.reasoning !== undefined) out.reasoning = req.reasoning;
   if (typeof req.instructions === "string" && req.instructions !== "") {
     out.messages.push({ role: "system", content: req.instructions });
   }
@@ -246,6 +247,7 @@ export function chatToResponsesRequest(req: ChatRequest): Record<string, unknown
     }));
   }
   if (req.tool_choice !== undefined) out.tool_choice = req.tool_choice;
+  if (req.reasoning !== undefined) out.reasoning = req.reasoning;
   return out;
 }
 

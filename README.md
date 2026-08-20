@@ -21,6 +21,7 @@
 - 调用方鉴权（`ZEN_AUTH_KEY`）
 - 429 自动重试 + 熔断 + 匿名失败自动回退 API key
 - 上游特殊适配（deepseek reasoning_content、多模态 400、tool_calls 序列修复等）：见 [docs/special-adaptations.md](docs/special-adaptations.md)
+- 思考内容跨协议回传：DeepSeek `reasoning_content`、Responses `reasoning`、Anthropic `thinking` 块（保留 signature）、Gemini `thought` 部分，双向流式/非流式互转
 - socks5 代理、IPv6 优先、每请求新连接（`ZEN_SOCKS5` / `ZEN_IPV6_PREFER` / `ZEN_ROTATE_IP`）
 - 兼容模式：`ZEN_FORCE_CHAT_COMPLETIONS`（统一 chat 出站）、`ZEN_FORCE_CHAT_INBOUND`（只收 chat）
 - Codex / Responses 的内置工具类型自动过滤为 Zen 可接受的标准 `function` 工具

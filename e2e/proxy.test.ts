@@ -906,6 +906,190 @@ describe("DeepSeek reasoning_content replay", () => {
   });
 });
 
+describe("thinking content relay across protocols", () => {
+  test("gemini thought part -> chat client gets reasoning_content (streaming)", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/models/gemini-3.6-flash") return jsonResponse({});
+      const thought = { candidates: [{ content: { role: "model", parts: [{ text: "think hard", thought: true }] } }] };
+      const answer = { candidates: [{ content: { role: "model", parts: [{ text: "gemtext" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 } };
+      return sseResponse(`data: ${JSON.stringify(thought)}\n\ndata: ${JSON.stringify(answer)}\n\n`);
+    });
+    const res = await post({ model: "gemini-3.6-flash", messages: [{ role: "user", content: "go" }], stream: true });
+    expect(res.status).toBe(200);
+    const reasoning: string[] = [];
+    const contents: string[] = [];
+    for (const e of await collectData(res)) {
+      if (e.data === "[DONE]") continue;
+      const payload = JSON.parse(e.data) as { choices?: Array<{ delta?: { reasoning_content?: string; content?: string } }> };
+      for (const choice of payload.choices ?? []) {
+        if (choice.delta?.reasoning_content) reasoning.push(choice.delta.reasoning_content);
+        if (choice.delta?.content) contents.push(choice.delta.content);
+      }
+    }
+    expect(reasoning.join("")).toBe("think hard");
+    expect(contents.join("")).toBe("gemtext");
+  });
+
+  test("claude thinking block -> responses client gets reasoning_text.delta (streaming)", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/messages") return jsonResponse({});
+      const lines = [
+        `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "m1", type: "message", role: "assistant", model: ctx.model, content: [], usage: { input_tokens: 1, output_tokens: 0 } } })}\n\n`,
+        `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } })}\n\n`,
+        `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "claude thinks" } })}\n\n`,
+        `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0, content_block: { type: "thinking", thinking: "claude thinks", signature: "sig-claude" } })}\n\n`,
+        `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } })}\n\n`,
+        `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "answer" } })}\n\n`,
+        `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 1 })}\n\n`,
+        `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 2 } })}\n\n`,
+        `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+      ];
+      return sseResponse(lines.join(""));
+    });
+    const res = await post({ model: "claude-opus-5", input: "go", stream: true }, "/v1/responses");
+    expect(res.status).toBe(200);
+    const reasoningDeltas = (await collectData(res))
+      .map((e) => {
+        try {
+          const t = JSON.parse(e.data) as { type?: string; delta?: string };
+          return t.type === "response.reasoning_text.delta" ? t.delta : undefined;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((v): v is string => typeof v === "string");
+    expect(reasoningDeltas.join("")).toBe("claude thinks");
+    expect(mock.last()?.path).toBe("/messages");
+  });
+
+  test("gpt reasoning (responses upstream) -> chat client gets reasoning_content (streaming)", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/responses") return jsonResponse({});
+      const created = { id: "resp_1", object: "response", created_at: 1700000000, status: "in_progress", model: ctx.model, output: [] };
+      const lines = [
+        JSON.stringify({ type: "response.created", response: created }),
+        JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { id: "rs_1", type: "reasoning", summary: [], content: [] } }),
+        JSON.stringify({ type: "response.reasoning_text.delta", item_id: "rs_1", output_index: 0, content_index: 0, delta: "gpt " }),
+        JSON.stringify({ type: "response.reasoning_text.delta", item_id: "rs_1", output_index: 0, content_index: 0, delta: "thinks" }),
+        JSON.stringify({ type: "response.output_item.added", output_index: 1, item: { id: "msg_1", type: "message", role: "assistant", content: [] } }),
+        JSON.stringify({ type: "response.output_text.delta", item_id: "msg_1", output_index: 1, content_index: 0, delta: "hello" }),
+        JSON.stringify({ type: "response.completed", response: { id: "resp_1", object: "response", created_at: 1700000000, status: "completed", model: ctx.model, output: [{ id: "msg_1", type: "message", role: "assistant", content: [{ type: "output_text", text: "hello", annotations: [] }] }] } }),
+      ];
+      return sseResponse(lines.map((l) => `data: ${l}\n\n`).join(""));
+    });
+    const res = await post({ model: "gpt-5.4", messages: [{ role: "user", content: "go" }], stream: true });
+    expect(res.status).toBe(200);
+    const reasoning: string[] = [];
+    const contents: string[] = [];
+    for (const e of await collectData(res)) {
+      if (e.data === "[DONE]") continue;
+      const payload = JSON.parse(e.data) as { choices?: Array<{ delta?: { reasoning_content?: string; content?: string } }> };
+      for (const choice of payload.choices ?? []) {
+        if (choice.delta?.reasoning_content) reasoning.push(choice.delta.reasoning_content);
+        if (choice.delta?.content) contents.push(choice.delta.content);
+      }
+    }
+    expect(reasoning.join("")).toBe("gpt thinks");
+    expect(contents.join("")).toBe("hello");
+    expect(mock.last()?.path).toBe("/responses");
+  });
+
+  test("claude thinking history -> deepseek chat upstream gets reasoning_content", async () => {
+    mock.clear();
+    let forwardedReasoning = "";
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") {
+        const req = ctx.body as { messages: Array<{ role: string; reasoning_content?: string }> };
+        forwardedReasoning = req.messages.find((m) => m.role === "assistant")?.reasoning_content ?? "";
+        return jsonResponse(chatCompletionJson(ctx.model, "ok"));
+      }
+      return jsonResponse({});
+    });
+    const res = await post(
+      {
+        model: "deepseek-v4-flash-free",
+        messages: [
+          { role: "user", content: "go" },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "claude history", signature: "sig-hist" },
+              { type: "text", text: "answer" },
+            ],
+          },
+        ],
+      },
+      "/v1/messages",
+    );
+    expect(res.status).toBe(200);
+    expect(mock.last()?.path).toBe("/chat/completions");
+    expect(forwardedReasoning).toBe("claude history");
+  });
+
+  test("deepseek reasoning_content -> claude client gets thinking events (streaming)", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      return chatSSE(ctx.model, [{ reasoning: "ds ", content: undefined }, { reasoning: "thinks", content: "answer" }]);
+    });
+    const res = await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "go" }], stream: true }, "/v1/messages");
+    expect(res.status).toBe(200);
+    const events = await collectData(res);
+    const thinking = events
+      .map((e) => {
+        try {
+          const t = JSON.parse(e.data) as { type?: string; delta?: { thinking?: string } };
+          return t.type === "content_block_delta" && t.delta?.thinking ? t.delta.thinking : undefined;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((v): v is string => typeof v === "string");
+    expect(thinking.join("")).toBe("ds thinks");
+    expect(events.some((e) => {
+      try {
+        const t = JSON.parse(e.data) as { type?: string };
+        return t.type === "content_block_start";
+      } catch {
+        return false;
+      }
+    })).toBe(true);
+  });
+
+  test("claude inbound thinking history + signature survives messages -> messages round trip", async () => {
+    mock.clear();
+    let upstreamThinking: unknown;
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/messages") return jsonResponse({});
+      const req = ctx.body as { messages: Array<{ content: unknown }> };
+      upstreamThinking = (req.messages[1]?.content as Array<Record<string, unknown>>)?.[0];
+      return jsonResponse(messagesJson(ctx.model, "ok"));
+    });
+    const res = await post(
+      {
+        model: "claude-opus-5",
+        messages: [
+          { role: "user", content: "go" },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "keep me", signature: "sig-keep" },
+              { type: "text", text: "answer" },
+            ],
+          },
+        ],
+      },
+      "/v1/messages",
+    );
+    expect(res.status).toBe(200);
+    expect(mock.last()?.path).toBe("/messages");
+    expect(upstreamThinking).toEqual({ type: "thinking", thinking: "keep me", signature: "sig-keep" });
+  });
+});
+
 describe("retry + fallback", () => {
   test("429 then success is retried transparently", async () => {
     let calls = 0;

@@ -350,7 +350,7 @@ export class Proxy {
   private renderOutboundRequest(protocol: OutboundProtocol, req: ChatRequest): string {
     switch (protocol) {
       case "chat":
-        return renderChatRequest(isDeepSeekModel(req.model) ? req : withoutReasoningContent(req));
+        return renderChatRequest(stripProtocolParams(isDeepSeekModel(req.model) ? req : withoutReasoningContent(req)));
       case "responses":
         return JSON.stringify(chatToResponsesRequest(req));
       case "messages":
@@ -665,7 +665,18 @@ function fillMissingDeepSeekReasoning(messages: ChatMessage[]): number {
 function withoutReasoningContent(req: ChatRequest): ChatRequest {
   return {
     ...req,
-    messages: req.messages.map(({ reasoning_content: _reasoningContent, ...message }) => message),
+    messages: req.messages.map(({ reasoning_content: _reasoningContent, reasoning_signature: _signature, ...message }) => message),
+  };
+}
+
+/** Anthropic/Responses request params (thinking / reasoning) and the Anthropic
+ *  thinking signature are meaningless to a Chat Completions upstream and must
+ *  not leak into its body. */
+function stripProtocolParams(req: ChatRequest): ChatRequest {
+  const { thinking: _thinking, reasoning: _reasoning, reasoning_signature: _signature, ...rest } = req;
+  return {
+    ...rest,
+    messages: rest.messages.map(({ reasoning_signature: _sig, ...message }) => message),
   };
 }
 

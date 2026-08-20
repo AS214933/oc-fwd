@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { responsesToChatRequest, chatToResponsesRequest, renderChatCompletionAsResponses } from "./responses";
-import { messagesToChatRequest, chatToMessagesRequest } from "./messages";
+import { messagesToChatRequest, chatToMessagesRequest, parseMessagesResponse, renderChatCompletionAsMessages } from "./messages";
 import { parseChatCompletion, parseChatRequest } from "./chat";
-import { chatToGeminiRequest } from "./gemini";
-import { chatChunksToResponses, responsesToChatChunks, chatChunksToMessages, chatChunksToGemini, readSSE, type SseEvent } from "./stream";
+import { chatToGeminiRequest, parseGeminiResponse } from "./gemini";
+import {
+  chatChunksToResponses, responsesToChatChunks, chatChunksToMessages, chatChunksToGemini,
+  messagesToChatChunks, geminiToChatChunks, renderMessagesEventsFromCompletion,
+  renderGeminiEventFromCompletion, readSSE, type SseEvent,
+} from "./stream";
 import { sanitizeFunctionTools, type ChatChunk, type ChatRequest } from "./types";
 
 const chunk = (partial: Partial<ChatChunk>): ChatChunk => ({
@@ -112,6 +116,13 @@ describe("responses -> chat request", () => {
       { role: "assistant", content: "The repository is ready.", reasoning_content: "inspect the repository" },
       { role: "user", content: "continue" },
     ]);
+  });
+
+  test("preserves the reasoning param across a responses round trip", () => {
+    const req = responsesToChatRequest({ model: "gpt-5.5", reasoning: { effort: "high" }, input: "hi" });
+    expect((req as unknown as Record<string, unknown>).reasoning).toEqual({ effort: "high" });
+    const out = chatToResponsesRequest(req) as Record<string, unknown>;
+    expect(out.reasoning).toEqual({ effort: "high" });
   });
 
   test("instructions + input items + tools", () => {
@@ -303,6 +314,70 @@ describe("messages <-> chat", () => {
     expect((blocks[2]?.content[0] as { type: string; tool_use_id: string }).type).toBe("tool_result");
     expect((blocks[2]?.content[0] as { tool_use_id: string }).tool_use_id).toBe("c1");
   });
+
+  test("anthropic thinking blocks -> reasoning_content + signature", () => {
+    const req = messagesToChatRequest({
+      model: "claude-opus-5",
+      thinking: { type: "enabled", budget_tokens: 1024 },
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "consider", signature: "sig-1" },
+            { type: "text", text: "answer" },
+          ],
+        },
+      ],
+    });
+    expect((req as unknown as Record<string, unknown>).thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
+    expect(req.messages[0]).toEqual({
+      role: "assistant",
+      content: "answer",
+      reasoning_content: "consider",
+      reasoning_signature: "sig-1",
+    });
+  });
+
+  test("chat reasoning_content -> anthropic thinking block", () => {
+    const out = chatToMessagesRequest({
+      model: "claude-opus-5",
+      thinking: { type: "enabled", budget_tokens: 1024 },
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "answer", reasoning_content: "consider", reasoning_signature: "sig-1" },
+      ],
+    });
+    expect((out as Record<string, unknown>).thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
+    const blocks = (out.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>)[1]?.content;
+    expect(blocks?.[0]).toEqual({ type: "thinking", thinking: "consider", signature: "sig-1" });
+    expect(blocks?.[1]).toEqual({ type: "text", text: "answer" });
+  });
+
+  test("messages response thinking block round trips through the completion", () => {
+    const parsed = parseMessagesResponse({
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-5",
+      content: [
+        { type: "thinking", thinking: "plan", signature: "sig-2" },
+        { type: "text", text: "hello" },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 3 },
+    });
+    expect(parsed.choices[0]?.message).toMatchObject({
+      content: "hello",
+      reasoning_content: "plan",
+      reasoning_signature: "sig-2",
+    });
+    const rendered = renderChatCompletionAsMessages(parsed);
+    expect((rendered.content as Array<Record<string, unknown>>)[0]).toEqual({
+      type: "thinking",
+      thinking: "plan",
+      signature: "sig-2",
+    });
+  });
 });
 
 describe("chat -> gemini request", () => {
@@ -323,6 +398,38 @@ describe("chat -> gemini request", () => {
     expect(contents[1]?.role).toBe("model");
     expect(out.generationConfig).toEqual({ maxOutputTokens: 10 });
     expect((out.tools as Array<{ functionDeclarations: unknown[] }>)[0]?.functionDeclarations).toHaveLength(1);
+  });
+
+  test("reasoning_content becomes a thought part", () => {
+    const out = chatToGeminiRequest({
+      model: "gemini-3.5-flash",
+      messages: [{ role: "assistant", content: "answer", reasoning_content: "consider" }],
+    });
+    const contents = out.contents as Array<{ parts: Array<Record<string, unknown>> }>;
+    expect(contents[0]?.parts[0]).toEqual({ text: "consider", thought: true });
+    expect(contents[0]?.parts[1]).toEqual({ text: "answer" });
+  });
+});
+
+describe("gemini -> chat", () => {
+  test("thought parts become reasoning_content instead of leaking into text", () => {
+    const parsed = parseGeminiResponse(JSON.parse(JSON.stringify({
+      candidates: [{
+        content: {
+          role: "model",
+          parts: [
+            { text: "think hard", thought: true },
+            { text: "answer" },
+          ],
+        },
+        finishReason: "STOP",
+      }],
+      usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 },
+    })));
+    expect(parsed.choices[0]?.message).toMatchObject({
+      content: "answer",
+      reasoning_content: "think hard",
+    });
   });
 });
 
@@ -406,6 +513,66 @@ describe("responses SSE -> chat chunks", () => {
     expect(chunks[chunks.length - 1]?.choices[0]?.finish_reason).toBe("stop");
     expect(chunks[chunks.length - 1]?.usage?.total_tokens).toBe(5);
   });
+
+  test("decodes reasoning deltas as reasoning_content", async () => {
+    const wire = [
+      { type: "response.created", response: { id: "r1", model: "gpt-5.4", created_at: 5 } },
+      { type: "response.output_item.added", output_index: 0, item: { id: "rs_1", type: "reasoning", summary: [], content: [] } },
+      { type: "response.reasoning_text.delta", item_id: "rs_1", output_index: 0, content_index: 0, delta: "inspect " },
+      { type: "response.reasoning_text.delta", item_id: "rs_1", output_index: 0, content_index: 0, delta: "files" },
+      { type: "response.output_item.added", output_index: 1, item: { id: "msg_1", type: "message", role: "assistant", content: [] } },
+      { type: "response.output_text.delta", item_id: "msg_1", output_index: 1, content_index: 0, delta: "done" },
+      { type: "response.completed", response: { usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 } } },
+    ].map((o) => ({ event: undefined, data: JSON.stringify(o) }));
+    const chunks: ChatChunk[] = [];
+    for await (const c of responsesToChatChunks(scanEvents(wire))) chunks.push(c);
+    const reasoning = chunks.flatMap((c) => c.choices.map((ch) => ch.delta.reasoning_content ?? "")).join("");
+    const content = chunks.flatMap((c) => c.choices.map((ch) => ch.delta.content ?? "")).join("");
+    expect(reasoning).toBe("inspect files");
+    expect(content).toBe("done");
+  });
+});
+
+describe("messages SSE -> chat chunks", () => {
+  test("decodes thinking deltas and signature", async () => {
+    const wire = [
+      { type: "message_start", message: { id: "m1", model: "claude-opus-5", usage: { input_tokens: 1, output_tokens: 0 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "cons" } },
+      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "ider" } },
+      { type: "content_block_stop", index: 0, content_block: { type: "thinking", thinking: "consider", signature: "sig-1" } },
+      { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "answer" } },
+      { type: "content_block_stop", index: 1 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" } },
+      { type: "message_stop" },
+    ].map((o) => ({ event: undefined, data: JSON.stringify(o) }));
+    const chunks: ChatChunk[] = [];
+    for await (const c of messagesToChatChunks(scanEvents(wire))) chunks.push(c);
+    const reasoning = chunks.flatMap((c) => c.choices.map((ch) => ch.delta.reasoning_content ?? "")).join("");
+    const content = chunks.flatMap((c) => c.choices.map((ch) => ch.delta.content ?? "")).join("");
+    expect(reasoning).toBe("consider");
+    expect(content).toBe("answer");
+    expect(chunks.some((c) => c.choices[0]?.delta.reasoning_signature === "sig-1")).toBe(true);
+  });
+});
+
+describe("gemini SSE -> chat chunks", () => {
+  test("thought parts become reasoning_content", async () => {
+    const wire = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "think", thought: true }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [{ text: "answer" }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+      },
+    ].map((o) => ({ event: undefined, data: JSON.stringify(o) }));
+    const chunks: ChatChunk[] = [];
+    for await (const c of geminiToChatChunks(scanEvents(wire))) chunks.push(c);
+    const reasoning = chunks.flatMap((c) => c.choices.map((ch) => ch.delta.reasoning_content ?? "")).join("");
+    const content = chunks.flatMap((c) => c.choices.map((ch) => ch.delta.content ?? "")).join("");
+    expect(reasoning).toBe("think");
+    expect(content).toBe("answer");
+  });
 });
 
 describe("chat chunks -> messages / gemini SSE", () => {
@@ -434,6 +601,76 @@ describe("chat chunks -> messages / gemini SSE", () => {
     const last = JSON.parse(events[1]!.data) as { candidates: Array<{ finishReason: string }>; usageMetadata: { totalTokenCount: number } };
     expect(last.candidates[0]?.finishReason).toBe("STOP");
     expect(last.usageMetadata.totalTokenCount).toBe(2);
+  });
+
+  test("emits anthropic thinking events with signature stop", async () => {
+    async function* chunks() {
+      yield chunk({ model: "claude-opus-5", choices: [{ index: 0, delta: { reasoning_content: "cons" } }] });
+      yield chunk({ model: "claude-opus-5", choices: [{ index: 0, delta: { reasoning_content: "ider" } }] });
+      yield chunk({ model: "claude-opus-5", choices: [{ index: 0, delta: { reasoning_signature: "sig-1" } }] });
+      yield chunk({ model: "claude-opus-5", choices: [{ index: 0, delta: { content: "answer" } }] });
+      yield chunk({ model: "claude-opus-5", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+    }
+    const events = await collectEvents(chatChunksToMessages(chunks()));
+    const data = events.map((e) => JSON.parse(e.data) as Record<string, unknown>);
+    const thinkingStart = data.find((d) => d.type === "content_block_start" && (d.content_block as Record<string, unknown>)?.type === "thinking");
+    expect(thinkingStart).toBeTruthy();
+    const thinkingDeltas = data.filter((d) => d.type === "content_block_delta" && (d.delta as Record<string, unknown>)?.type === "thinking_delta");
+    expect(thinkingDeltas.map((d) => (d.delta as Record<string, unknown>).thinking).join("")).toBe("consider");
+    const thinkingStop = data.find((d) => d.type === "content_block_stop" && (d.content_block as Record<string, unknown>)?.type === "thinking");
+    expect(thinkingStop?.content_block).toEqual({ type: "thinking", thinking: "consider", signature: "sig-1" });
+  });
+
+  test("emits gemini thought parts", async () => {
+    async function* chunks() {
+      yield chunk({ model: "gemini-3.5-flash", choices: [{ index: 0, delta: { reasoning_content: "think" } }] });
+      yield chunk({ model: "gemini-3.5-flash", choices: [{ index: 0, delta: { content: "hi" } }] });
+      yield chunk({ model: "gemini-3.5-flash", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+    }
+    const events = await collectEvents(chatChunksToGemini(chunks()));
+    expect(JSON.parse(events[0]!.data)).toMatchObject({
+      candidates: [{ content: { role: "model", parts: [{ text: "think", thought: true }] } }],
+    });
+  });
+
+  test("renderMessagesEventsFromCompletion emits thinking block with signature", () => {
+    const events = renderMessagesEventsFromCompletion({
+      id: "c",
+      object: "chat.completion",
+      model: "claude-opus-5",
+      created: 1,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "answer", reasoning_content: "consider", reasoning_signature: "sig-1" },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    });
+    const data = events.map((e) => JSON.parse(e.data) as Record<string, unknown>);
+    const thinkingStart = data.find((d) => d.type === "content_block_start" && (d.content_block as Record<string, unknown>)?.type === "thinking");
+    expect(thinkingStart).toBeTruthy();
+    const thinkingStop = data.find((d) => d.type === "content_block_stop" && (d.content_block as Record<string, unknown>)?.type === "thinking");
+    expect(thinkingStop?.content_block).toEqual({ type: "thinking", thinking: "consider", signature: "sig-1" });
+    const textStart = data.find((d) => d.type === "content_block_start" && (d.content_block as Record<string, unknown>)?.type === "text");
+    expect((textStart as Record<string, unknown>)?.index).toBe(1);
+  });
+
+  test("renderGeminiEventFromCompletion emits thought part", () => {
+    const ev = renderGeminiEventFromCompletion({
+      id: "c",
+      object: "chat.completion",
+      model: "gemini-3.5-flash",
+      created: 1,
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "answer", reasoning_content: "consider" },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    });
+    expect(JSON.parse(ev.data)).toMatchObject({
+      candidates: [{ content: { role: "model", parts: [{ text: "consider", thought: true }, { text: "answer" }] } }],
+    });
   });
 });
 
