@@ -138,15 +138,25 @@ export class UpstreamClient {
       }
 
       if (resp.status !== 200) {
-        if (await isPassthroughError(resp)) {
+        const summary = await summarizeUpstreamError(resp);
+        this.log.warn("upstream returned non-200", {
+          status: resp.status,
+          model,
+          error_type: summary.type,
+          error_code: summary.code,
+          error_message: summary.message,
+          body: summary.body,
+        });
+        if (summary.passthrough) {
           resp.destroy?.();
           this.log.info("upstream returned a non-retryable request error, passing through", {
             status: resp.status,
             model,
+            error_type: summary.type,
+            error_message: summary.message,
           });
           return resp;
         }
-        this.log.warn("upstream returned non-200", { status: resp.status });
         // Fail fast to API-key mode: the first non-2xx (other than a 429
         // rate limit, which the backoff ladder handles) switches this model
         // so every later request goes straight to the keyed path instead of
@@ -283,21 +293,49 @@ function modelFromBody(body: string): string {
 }
 
 /**
- * Decide whether an upstream error is deterministic (retrying it, especially
- * with a different auth mode, would produce the same failure). Zen answers
- * unsupported multimodal (image/audio/input_image/unknown content type)
- * requests with an invalid_request_error; those must be surfaced unchanged.
+ * Read an upstream error response body once, decide whether it is
+ * deterministic (retrying it, especially with a different auth mode, would
+ * produce the same failure) and expose the parsed error shape for logging.
  *
- * The body is fully decoded here (which also drains the stream); callers must
- * only invoke this on a response they have not streamed to the client yet.
+ * Zen answers unsupported multimodal (image/audio/input_image/unknown
+ * content type) requests with an invalid_request_error; those must be
+ * surfaced unchanged. The body is fully decoded here (which drains the
+ * stream); it is re-wrapped into resp.body so callers can still stream it
+ * to the client.
  */
-export async function isPassthroughError(resp: UpstreamResponse): Promise<boolean> {
-  if (resp.status < 400 || resp.status >= 500) return false;
+interface UpstreamErrorSummary {
+  passthrough: boolean;
+  type: string;
+  code: string;
+  message: string;
+  body: string;
+}
+
+export async function summarizeUpstreamError(resp: UpstreamResponse): Promise<UpstreamErrorSummary> {
+  const empty: UpstreamErrorSummary = { passthrough: false, type: "", code: "", message: "", body: "" };
+  if (resp.status < 400) return empty;
   let text: string;
   try {
     text = await readAllText(resp.body);
   } catch {
-    return false;
+    return empty;
+  }
+  // Common OpenAI/Anthropic/Gemini error envelope: { error: { message, type, code } }
+  let errorType = "";
+  let errorCode = "";
+  let errorMessage = "";
+  try {
+    const obj = JSON.parse(text) as { error?: { message?: unknown; type?: unknown; code?: unknown } };
+    const e = obj?.error;
+    if (e && typeof e === "object") {
+      if (typeof e.message === "string") errorMessage = e.message;
+      if (typeof e.type === "string") errorType = e.type;
+      if (typeof e.code === "string") errorCode = e.code;
+      else if (e.code !== undefined) errorCode = String(e.code);
+    }
+  } catch {
+    // not JSON — keep whole body as message
+    errorMessage = text.slice(0, 512);
   }
   const hay = text.toLowerCase();
   const multimodal = [
@@ -315,12 +353,10 @@ export async function isPassthroughError(resp: UpstreamResponse): Promise<boolea
     "not support multimodal",
   ];
   const isInvalidRequest = hay.includes("invalid_request_error") || hay.includes("invalid request error");
-  if (multimodal.some((k) => hay.includes(k)) && isInvalidRequest) {
-    resp.body = new Blob([text]).stream();
-    return true;
-  }
-  resp.body = new Blob([text]).stream();
-  return false;
+  const passthrough = multimodal.some((k) => hay.includes(k)) && isInvalidRequest;
+  const truncated = text.length > 2048 ? text.slice(0, 2048) + "…" : text;
+  resp.body = new Blob([truncated]).stream();
+  return { passthrough, type: errorType, code: errorCode, message: errorMessage, body: truncated };
 }
 
 async function readAllText(stream: ReadableStream<Uint8Array>): Promise<string> {
