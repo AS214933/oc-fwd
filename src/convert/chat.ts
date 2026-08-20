@@ -21,6 +21,7 @@ export function parseChatRequest(body: unknown): ChatRequest {
     return {
       role: typeof msg.role === "string" ? msg.role : "user",
       content: contentToString(msg.content),
+      ...(typeof msg.reasoning_content === "string" ? { reasoning_content: msg.reasoning_content } : {}),
       ...(typeof msg.tool_call_id === "string" ? { tool_call_id: msg.tool_call_id } : {}),
       ...(Array.isArray(msg.tool_calls) ? { tool_calls: parseToolCalls(msg.tool_calls as unknown[]) } : {}),
     };
@@ -97,6 +98,7 @@ export function parseChatCompletion(data: unknown): ChatCompletion {
         message: {
           role: typeof msg.role === "string" ? msg.role : "assistant",
           content: contentToString(msg.content),
+          ...(typeof msg.reasoning_content === "string" ? { reasoning_content: msg.reasoning_content } : {}),
           ...(Array.isArray(msg.tool_calls) ? { tool_calls: parseToolCalls(msg.tool_calls as unknown[]) } : {}),
         },
         finish_reason: typeof choice.finish_reason === "string" ? choice.finish_reason : "stop",
@@ -121,6 +123,7 @@ function parseChatChunk(data: unknown): ChatChunk | null {
       delta: {
         ...(typeof delta.role === "string" ? { role: delta.role } : {}),
         ...(typeof delta.content === "string" ? { content: delta.content } : {}),
+        ...(typeof delta.reasoning_content === "string" ? { reasoning_content: delta.reasoning_content } : {}),
         ...(Array.isArray(delta.tool_calls) ? { tool_calls: delta.tool_calls as ChatChunk["choices"][number]["delta"]["tool_calls"] } : {}),
       },
       ...(typeof ch.finish_reason === "string" ? { finish_reason: ch.finish_reason } : {}),

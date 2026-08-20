@@ -393,7 +393,8 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
   let createdAt = Math.floor(Date.now() / 1000);
   let msgAdded = false;
   let text = "";
-  let msgIndex = 0;
+  let reasoningAdded = false;
+  let reasoning = "";
   let toolSeen = 0;
   const tools = new Map<number, ResponsesToolState>();
   let usage: ChatUsage | undefined;
@@ -426,23 +427,34 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
     output,
     usage: responseUsage(),
   });
+  const reasoningItem = (content: string): Record<string, unknown> => ({
+    id: "rs_1",
+    type: "reasoning",
+    summary: [],
+    content: content ? [{ type: "reasoning_text", text: content }] : [],
+  });
 
   const finishEvents = (): SseEvent[] => {
     if (finished) return [];
     finished = true;
     const events: SseEvent[] = [];
     const output: unknown[] = [];
+    if (reasoning) {
+      const item = reasoningItem(reasoning);
+      events.push(event("response.output_item.done", { output_index: 0, item }));
+      output.push(item);
+    }
     if (msgAdded) {
-      events.push(event("response.output_text.done", { item_id: "msg_1", output_index: 0, content_index: 0, text }));
+      events.push(event("response.output_text.done", { item_id: "msg_1", output_index: 1, content_index: 0, text }));
       events.push(event("response.content_part.done", {
-        item_id: "msg_1", output_index: 0, content_index: 0,
+        item_id: "msg_1", output_index: 1, content_index: 0,
         part: { type: "output_text", text, annotations: [] },
       }));
       const msgItem = {
         id: "msg_1", type: "message", status: "completed", role: "assistant",
         content: [{ type: "output_text", text, annotations: [] }],
       };
-      events.push(event("response.output_item.done", { output_index: 0, item: msgItem }));
+      events.push(event("response.output_item.done", { output_index: 1, item: msgItem }));
       output.push(msgItem);
     }
     const sortedTools = [...tools.values()].sort((a, b) => a.index - b.index);
@@ -473,28 +485,38 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
     const choice = chunk.choices[0];
     if (!choice) continue;
     const d = choice.delta;
+    if (d.reasoning_content) {
+      if (!reasoningAdded) {
+        reasoningAdded = true;
+        yield event("response.output_item.added", { output_index: 0, item: reasoningItem("") });
+      }
+      reasoning += d.reasoning_content;
+      yield event("response.reasoning_text.delta", {
+        item_id: "rs_1", output_index: 0, content_index: 0, delta: d.reasoning_content,
+      });
+    }
     if (d.content) {
       if (!msgAdded) {
         msgAdded = true;
         yield event("response.output_item.added", {
-          output_index: 0,
+          output_index: 1,
           item: { id: "msg_1", type: "message", status: "in_progress", role: "assistant", content: [] },
         });
         yield event("response.content_part.added", {
-          item_id: "msg_1", output_index: 0, content_index: 0,
+          item_id: "msg_1", output_index: 1, content_index: 0,
           part: { type: "output_text", text: "", annotations: [] },
         });
       }
       text += d.content;
       yield event("response.output_text.delta", {
-        item_id: "msg_1", output_index: 0, content_index: 0, delta: d.content,
+        item_id: "msg_1", output_index: 1, content_index: 0, delta: d.content,
       });
     }
     for (const tc of d.tool_calls ?? []) {
       const index = tc.index ?? tools.size;
       let t = tools.get(index);
       if (!t) {
-        t = { index, id: tc.id ?? `call_${index + 1}`, name: "", args: "", added: false, doneIdx: -1 };
+        t = { index: index + 2, id: tc.id ?? `call_${index + 1}`, name: "", args: "", added: false, doneIdx: -1 };
         tools.set(index, t);
       }
       if (tc.id) t.id = tc.id;
@@ -718,6 +740,12 @@ export function renderResponsesEventsFromCompletion(completion: ChatCompletion):
   };
   const output: unknown[] = [];
   const msg = completion.choices[0]?.message;
+  if (msg?.reasoning_content && msg.tool_calls?.length) {
+    output.push({
+      id: "rs_1", type: "reasoning", summary: [],
+      content: [{ type: "reasoning_text", text: msg.reasoning_content }],
+    });
+  }
   if (msg?.content) {
     output.push({
       id: "msg_1", type: "message", status: "completed", role: "assistant",
@@ -732,10 +760,14 @@ export function renderResponsesEventsFromCompletion(completion: ChatCompletion):
   });
   resp.output = output;
   const created = { ...resp, status: "in_progress", output: [] };
-  return [
+  const events: SseEvent[] = [
     { event: undefined, data: JSON.stringify({ type: "response.created", response: created }) },
-    { event: undefined, data: JSON.stringify({ type: "response.completed", response: resp }) },
   ];
+  output.forEach((item, output_index) => {
+    events.push({ event: undefined, data: JSON.stringify({ type: "response.output_item.done", output_index, item }) });
+  });
+  events.push({ event: undefined, data: JSON.stringify({ type: "response.completed", response: resp }) });
+  return events;
 }
 
 /** Render a complete chat completion as an Anthropic Messages SSE sequence. */

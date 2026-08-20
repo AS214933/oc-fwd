@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { responsesToChatRequest, chatToResponsesRequest } from "./responses";
+import { responsesToChatRequest, chatToResponsesRequest, renderChatCompletionAsResponses } from "./responses";
 import { messagesToChatRequest, chatToMessagesRequest } from "./messages";
-import { parseChatRequest } from "./chat";
+import { parseChatCompletion, parseChatRequest } from "./chat";
 import { chatToGeminiRequest } from "./gemini";
 import { chatChunksToResponses, responsesToChatChunks, chatChunksToMessages, chatChunksToGemini, readSSE, type SseEvent } from "./stream";
 import type { ChatChunk } from "./types";
@@ -71,6 +71,34 @@ describe("responses -> chat request", () => {
     expect(empty[0]?.tool_call_id).toBe("call_b");
   });
 
+  test("replays raw reasoning on the assistant message that owns tool calls", () => {
+    const req = responsesToChatRequest({
+      model: "deepseek-v4-flash-free",
+      input: [
+        {
+          type: "reasoning",
+          content: [
+            { type: "reasoning_text", text: "inspect " },
+            { type: "reasoning_text", text: "the repository" },
+          ],
+        },
+        { type: "function_call", call_id: "call_a", name: "find", arguments: "{}" },
+        { type: "function_call", call_id: "call_b", name: "read", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_a", output: "a" },
+        { type: "function_call_output", call_id: "call_b", output: "b" },
+      ],
+    });
+    expect(req.messages[0]).toEqual({
+      role: "assistant",
+      content: "",
+      reasoning_content: "inspect the repository",
+      tool_calls: [
+        { id: "call_a", type: "function", function: { name: "find", arguments: "{}" } },
+        { id: "call_b", type: "function", function: { name: "read", arguments: "{}" } },
+      ],
+    });
+  });
+
   test("instructions + input items + tools", () => {
     const req = responsesToChatRequest({
       model: "gpt-5.4",
@@ -128,6 +156,31 @@ describe("chat -> responses request", () => {
       { type: "function_call", call_id: "c1", name: "f", arguments: "{}" },
       { type: "function_call_output", call_id: "c1", output: "ok" },
     ]);
+  });
+
+  test("preserves assistant tool-call reasoning as a Responses item", () => {
+    const completion = parseChatCompletion({
+      id: "chat_1",
+      model: "deepseek-v4-flash-free",
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          reasoning_content: "check the workspace",
+          tool_calls: [{ id: "call_1", type: "function", function: { name: "list", arguments: "{}" } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    });
+    const output = renderChatCompletionAsResponses(completion).output as Array<Record<string, unknown>>;
+    expect(output[0]).toEqual({
+      id: "rs_1",
+      type: "reasoning",
+      summary: [],
+      content: [{ type: "reasoning_text", text: "check the workspace" }],
+    });
+    expect(output[1]?.type).toBe("function_call");
   });
 });
 
@@ -244,6 +297,26 @@ describe("chat chunk -> responses SSE", () => {
     const completed = data[data.length - 1] as { response: { output: Array<{ type: string; arguments: string }> } };
     expect(completed.response.output[0]?.type).toBe("function_call");
     expect(completed.response.output[0]?.arguments).toBe("{}");
+  });
+
+  test("preserves DeepSeek reasoning deltas as a completed Responses reasoning item", async () => {
+    async function* chunks() {
+      yield chunk({ model: "deepseek-v4-flash-free", choices: [{ index: 0, delta: { reasoning_content: "inspect " } }] });
+      yield chunk({ model: "deepseek-v4-flash-free", choices: [{ index: 0, delta: { reasoning_content: "files" } }] });
+      yield chunk({ model: "deepseek-v4-flash-free", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "list" } }] } }] });
+      yield chunk({ model: "deepseek-v4-flash-free", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "{}" } }] } }] });
+      yield chunk({ model: "deepseek-v4-flash-free", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] });
+    }
+    const events = await collectEvents(chatChunksToResponses(chunks()));
+    const data = events.map((e) => JSON.parse(e.data) as Record<string, unknown>);
+    expect(data.some((event) => event.type === "response.reasoning_text.delta" && event.delta === "inspect ")).toBe(true);
+    const reasoningDone = data.find((event) => {
+      const item = event.item as Record<string, unknown> | undefined;
+      return event.type === "response.output_item.done" && item?.type === "reasoning";
+    });
+    expect(reasoningDone?.item).toMatchObject({
+      content: [{ type: "reasoning_text", text: "inspect files" }],
+    });
   });
 });
 

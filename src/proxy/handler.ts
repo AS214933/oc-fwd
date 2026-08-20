@@ -262,7 +262,7 @@ export class Proxy {
   private renderOutboundRequest(protocol: OutboundProtocol, req: ChatRequest): string {
     switch (protocol) {
       case "chat":
-        return renderChatRequest(req);
+        return renderChatRequest(isDeepSeekModel(req.model) ? req : withoutReasoningContent(req));
       case "responses":
         return JSON.stringify(chatToResponsesRequest(req));
       case "messages":
@@ -498,6 +498,17 @@ class BodyError extends Error {
 
 function isSSE(contentType: string): boolean {
   return contentType.toLowerCase().includes("text/event-stream");
+}
+
+function isDeepSeekModel(model: string): boolean {
+  return model.toLowerCase().startsWith("deepseek-");
+}
+
+function withoutReasoningContent(req: ChatRequest): ChatRequest {
+  return {
+    ...req,
+    messages: req.messages.map(({ reasoning_content: _reasoningContent, ...message }) => message),
+  };
 }
 
 function validCallerKey(req: Request, want: string): boolean {

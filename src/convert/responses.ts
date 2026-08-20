@@ -27,6 +27,7 @@ interface InputItem {
   role?: string;
   content?: unknown;
   text?: string;
+  reasoning_content?: string;
   id?: string;
   call_id?: string;
   name?: string;
@@ -53,6 +54,7 @@ export function parseResponsesRequest(raw: Record<string, unknown>): ResponsesRe
 /** Convert a parsed Responses request to canonical Chat Completions. */
 export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
   const out: ChatRequest = { model: req.model, messages: [], stream: req.stream === true };
+  let pendingReasoning = "";
   if (req.temperature !== undefined) out.temperature = req.temperature;
   if (req.max_output_tokens !== undefined) out.max_tokens = req.max_output_tokens;
   if (typeof req.instructions === "string" && req.instructions !== "") {
@@ -79,14 +81,26 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
             typeof item.arguments === "string"
               ? item.arguments
               : JSON.stringify(item.arguments ?? {});
-          out.messages.push({
-            role: "assistant",
-            content: "",
-            tool_calls: [{ id: toolID, type: "function", function: { name: item.name ?? "", arguments: args } }],
-          });
+          const toolCall = { id: toolID, type: "function" as const, function: { name: item.name ?? "", arguments: args } };
+          const previous = out.messages[out.messages.length - 1];
+          let message: ChatMessage;
+          if (previous?.role === "assistant") {
+            message = previous;
+          } else {
+            message = { role: "assistant", content: "", tool_calls: [] };
+            out.messages.push(message);
+          }
+          if (!message.tool_calls) message.tool_calls = [];
+          message.tool_calls.push(toolCall);
+          const rawReasoning = typeof item.reasoning_content === "string" ? item.reasoning_content : pendingReasoning;
+          if (rawReasoning) {
+            message.reasoning_content = (message.reasoning_content ?? "") + rawReasoning;
+          }
+          pendingReasoning = "";
           continue;
         }
         case "function_call_output": {
+          pendingReasoning = "";
           out.messages.push({
             role: "tool",
             tool_call_id: item.call_id || item.id || "",
@@ -94,14 +108,18 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
           });
           continue;
         }
-        case "reasoning":
+        case "reasoning": {
+          const rawReasoning = contentToString(item.content) || item.text || item.reasoning_content || "";
+          pendingReasoning += rawReasoning;
           continue;
+        }
       }
       const role = chatRole(item.role ?? "");
       const text = contentToString(item.content) || item.text || "";
       if (role && (item.type === "message" || item.content !== undefined || text !== "")) {
         out.messages.push({ role: role || "user", content: text });
       }
+      if (role !== "assistant") pendingReasoning = "";
     }
   } else {
     throw new Error("unsupported responses input");
@@ -186,6 +204,7 @@ export function chatToResponsesRequest(req: ChatRequest): Record<string, unknown
       continue;
     }
     if (msg.role === "assistant" && msg.tool_calls?.length) {
+      if (msg.reasoning_content) input.push(responsesReasoningItem(msg.reasoning_content));
       if (msg.content) {
         input.push({ type: "message", role: "assistant", content: msg.content });
       }
@@ -223,6 +242,7 @@ export function parseResponsesResponse(data: Record<string, unknown>): ChatCompl
   const output = Array.isArray(data.output) ? data.output : [];
   const message: ChatMessage = { role: "assistant", content: "" };
   const toolCalls: NonNullable<ChatMessage["tool_calls"]> = [];
+  let reasoningContent = "";
   for (const itemRaw of output) {
     const item = (itemRaw ?? {}) as Record<string, unknown>;
     switch (item.type) {
@@ -242,9 +262,13 @@ export function parseResponsesResponse(data: Record<string, unknown>): ChatCompl
         });
         break;
       }
+      case "reasoning":
+        reasoningContent += contentToString(item.content);
+        break;
     }
   }
   if (toolCalls.length > 0) message.tool_calls = toolCalls;
+  if (reasoningContent && toolCalls.length > 0) message.reasoning_content = reasoningContent;
   const usage = (data.usage ?? {}) as Record<string, unknown>;
   return {
     id: typeof data.id === "string" ? data.id : "resp_1",
@@ -282,6 +306,9 @@ export function renderChatCompletionAsResponses(completion: ChatCompletion): Rec
   };
   const output: unknown[] = [];
   const msg = completion.choices[0]?.message;
+  if (msg?.reasoning_content && msg.tool_calls?.length) {
+    output.push(responsesReasoningItem(msg.reasoning_content));
+  }
   if (msg && (msg.content !== "" || !msg.tool_calls?.length)) {
     output.push({
       id: "msg_1",
@@ -303,6 +330,15 @@ export function renderChatCompletionAsResponses(completion: ChatCompletion): Rec
   });
   out.output = output;
   return out;
+}
+
+function responsesReasoningItem(content: string): Record<string, unknown> {
+  return {
+    id: "rs_1",
+    type: "reasoning",
+    summary: [],
+    content: [{ type: "reasoning_text", text: content }],
+  };
 }
 
 function num(v: unknown): number {

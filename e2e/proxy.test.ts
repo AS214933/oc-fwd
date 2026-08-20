@@ -532,6 +532,95 @@ describe("protocol correctness with tools", () => {
   });
 });
 
+describe("DeepSeek reasoning_content replay", () => {
+  test("Responses SSE reasoning is returned to DeepSeek with the next tool turn", async () => {
+    mock.clear();
+    let replayedReasoning = "";
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      if (ctx.stream) {
+        return chatSSE(ctx.model, [
+          { reasoning: "inspect " },
+          { reasoning: "the workspace" },
+          { toolCall: { id: "call_1", name: "list", arguments: "{}" } },
+        ]);
+      }
+      const req = ctx.body as { messages: Array<{ role: string; reasoning_content?: string; tool_calls?: Array<{ id: string }> }> };
+      const toolCallMessage = req.messages.find((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.id === "call_1"));
+      replayedReasoning = toolCallMessage?.reasoning_content ?? "";
+      if (replayedReasoning === "inspect the workspace") {
+        return jsonResponse(chatCompletionJson(ctx.model, "tool result accepted"));
+      }
+      return jsonResponse({
+        error: {
+          message: "The `reasoning_content` in the thinking mode must be passed back to the API.",
+          type: "invalid_request_error",
+          code: "invalid_request_error",
+        },
+      }, 400);
+    });
+
+    const first = await post(
+      { model: "deepseek-v4-flash-free", input: "inspect the workspace", stream: true },
+      "/v1/responses",
+    );
+    expect(first.status).toBe(200);
+    const events = await collectData(first);
+    const outputItems: Array<Record<string, unknown>> = [];
+    for (const event of events) {
+      try {
+        const payload = JSON.parse(event.data) as { type?: string; item?: Record<string, unknown> };
+        if (payload.type === "response.output_item.done" && payload.item) outputItems.push(payload.item);
+      } catch {
+        // [DONE] is not JSON.
+      }
+    }
+    expect(outputItems.find((item) => item.type === "reasoning")).toMatchObject({
+      content: [{ type: "reasoning_text", text: "inspect the workspace" }],
+    });
+    expect(outputItems.find((item) => item.type === "function_call")).toMatchObject({ call_id: "call_1" });
+
+    const second = await post(
+      {
+        model: "deepseek-v4-flash-free",
+        input: [
+          ...outputItems,
+          { type: "function_call_output", call_id: "call_1", output: "[\"README.md\"]" },
+        ],
+      },
+      "/v1/responses",
+    );
+    expect(second.status).toBe(200);
+    expect(replayedReasoning).toBe("inspect the workspace");
+  });
+
+  test("only forwards the DeepSeek-specific field to DeepSeek Chat models", async () => {
+    mock.clear();
+    let forwardedReasoning: string | undefined;
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") {
+        const req = ctx.body as { messages: Array<{ role: string; reasoning_content?: string; tool_calls?: Array<{ id: string }> }> };
+        forwardedReasoning = req.messages.find((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.id === "call_1"))?.reasoning_content;
+        return jsonResponse(chatCompletionJson(ctx.model, "ok"));
+      }
+      return jsonResponse({});
+    });
+    const res = await post(
+      {
+        model: "kimi-k3",
+        input: [
+          { type: "reasoning", content: [{ type: "reasoning_text", text: "private DeepSeek state" }] },
+          { type: "function_call", call_id: "call_1", name: "list", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_1", output: "[]" },
+        ],
+      },
+      "/v1/responses",
+    );
+    expect(res.status).toBe(200);
+    expect(forwardedReasoning).toBeUndefined();
+  });
+});
+
 describe("retry + fallback", () => {
   test("429 then success is retried transparently", async () => {
     let calls = 0;

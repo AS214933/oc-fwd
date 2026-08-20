@@ -20,12 +20,13 @@ zenproxy 针对 opencode zen 网关（`https://opencode.ai/zen/v1`）及其背�
 ### 1b. deepseek 思考模式漏传 reasoning_content（400 invalid_request_error）
 
 **触发**：deepseek 系列（`deepseek-v4-flash-free` 等）开 thinking 模式时，多轮对话
-**必须**把上一轮 assistant 的 `reasoning_content` 原样带回；客户端（opencode /
-codex 等）若在下一轮请求里丢弃该字段，上游返回：
+**必须**把上一轮 assistant 的 `reasoning_content` 原样带回；否则上游返回：
 `The \`reasoning_content\` in the thinking mode must be passed back to the API.`
-**适配**：识别该错误后**直接原样返回**给客户端——不重试、不进入重试阶梯、
-**不触发匿名→API key 回退**、不切 key 模式。因为重试和换 key 都缺同一个字段，
-结果必然不变，重试只会拖延响应、切换只会白白消耗 key 配额并引发后续探测抖动。
+**适配**：对于 `/v1/responses` 入站，代理保留 Codex 返回/回传的
+`type:"reasoning"` 原始 `reasoning_text`，在下一轮把它附回同一条 assistant
+`tool_calls` 消息的 `reasoning_content` 字段。此往返同时覆盖普通 JSON 与 SSE，
+并只在 DeepSeek Chat 上游发送该专用字段。若调用方本身没有提供原文，仍将该确定性
+400 直接原样返回，不重试、不触发匿名→API key 回退。
 
 **判定关键字**：`reasoning_content` + `must be passed back`，且错误为
 `invalid_request_error`。
@@ -67,11 +68,11 @@ codex 等）若在下一轮请求里丢弃该字段，上游返回：
 
 - 任何非 200 上游响应都会把**解析后的错误体**打进日志：
   `[WARN] upstream returned non-200 {"status":...,"model":...,"error_type":...,"error_code":...,"error_message":...,"body":"..."}`。
-- `reasoning_content` 类错误额外带 `"direct_pass_through":true`，方便对照本清单判断走了哪条分支。
+- 缺少客户端原文时，`reasoning_content` 类错误额外带 `"direct_pass_through":true`，方便对照本清单判断走了哪条分支。
 
 ## 判定优先级（non-200 分支）
 
 1. 429 → 重试阶梯（尊重 Retry-After）+ 熔断
 2. 多模态确定性 400 → **直接原样返回**
-3. `reasoning_content` 确定性 400 → **直接原样返回**（不重试、不切 key）
+3. 缺少 `reasoning_content` 的确定性 400 → **直接原样返回**（不重试、不切 key）
 4. 其他非 200 → 重试阶梯耗尽后，匿名模式自动切 key 重试一次（fail-fast）

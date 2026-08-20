@@ -13,6 +13,8 @@ export interface ChatToolCall {
 export interface ChatMessage {
   role: string;
   content: string;
+  /** DeepSeek thinking-mode state that must accompany assistant tool calls. */
+  reasoning_content?: string;
   tool_call_id?: string;
   tool_calls?: ChatToolCall[];
 }
@@ -63,7 +65,7 @@ export interface ChatChunk {
   created: number;
   choices: Array<{
     index: number;
-    delta: { role?: string; content?: string; tool_calls?: ChatChunkToolCall[] };
+    delta: { role?: string; content?: string; reasoning_content?: string; tool_calls?: ChatChunkToolCall[] };
     finish_reason?: string;
   }>;
   usage?: ChatUsage;

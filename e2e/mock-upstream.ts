@@ -100,11 +100,14 @@ export function chatCompletionJson(model: string, content: string, toolCalls?: A
   };
 }
 
-export function chatSSE(model: string, parts: Array<{ content?: string; toolCall?: { id: string; name: string; arguments: string } }>, usage = true) {
+export function chatSSE(model: string, parts: Array<{ content?: string; reasoning?: string; toolCall?: { id: string; name: string; arguments: string } }>, usage = true) {
   const chunks: unknown[] = [];
   chunks.push({ id: "chatcmpl_1", object: "chat.completion.chunk", model, created: 1700000000, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
   let idx = 0;
   for (const part of parts) {
+    if (part.reasoning) {
+      chunks.push({ id: "chatcmpl_1", object: "chat.completion.chunk", model, created: 1700000000, choices: [{ index: 0, delta: { reasoning_content: part.reasoning } }] });
+    }
     if (part.content) {
       chunks.push({ id: "chatcmpl_1", object: "chat.completion.chunk", model, created: 1700000000, choices: [{ index: 0, delta: { content: part.content } }] });
     }
