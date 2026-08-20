@@ -146,8 +146,9 @@ export class UpstreamClient {
           error_code: summary.code,
           error_message: summary.message,
           body: summary.body,
+          ...(summary.retryOnly ? { retry_only: true } : {}),
         });
-        if (summary.passthrough) {
+        if (summary.passThrough) {
           resp.destroy?.();
           this.log.info("upstream returned a non-retryable request error, passing through", {
             status: resp.status,
@@ -155,6 +156,20 @@ export class UpstreamClient {
             error_type: summary.type,
             error_message: summary.message,
           });
+          return resp;
+        }
+        if (summary.retryOnly) {
+          // Deterministic client-side error (deepseek reasoning_content not
+          // echoed back): retry without switching key mode. The field is
+          // missing in every retry, so this exhausts the ladder and returns
+          // the 400 unchanged.
+          const wait = this.backoff(attempt, retryAfterSeconds(resp));
+          if (wait.ok) {
+            resp.destroy?.();
+            await sleep(wait.ms, signal);
+            attempt++;
+            continue;
+          }
           return resp;
         }
         // Fail fast to API-key mode: the first non-2xx (other than a 429
@@ -304,7 +319,8 @@ function modelFromBody(body: string): string {
  * to the client.
  */
 interface UpstreamErrorSummary {
-  passthrough: boolean;
+  passThrough: boolean;
+  retryOnly: boolean;
   type: string;
   code: string;
   message: string;
@@ -312,7 +328,7 @@ interface UpstreamErrorSummary {
 }
 
 export async function summarizeUpstreamError(resp: UpstreamResponse): Promise<UpstreamErrorSummary> {
-  const empty: UpstreamErrorSummary = { passthrough: false, type: "", code: "", message: "", body: "" };
+  const empty: UpstreamErrorSummary = { passThrough: false, retryOnly: false, type: "", code: "", message: "", body: "" };
   if (resp.status < 400) return empty;
   let text: string;
   try {
@@ -353,10 +369,17 @@ export async function summarizeUpstreamError(resp: UpstreamResponse): Promise<Up
     "not support multimodal",
   ];
   const isInvalidRequest = hay.includes("invalid_request_error") || hay.includes("invalid request error");
-  const passthrough = multimodal.some((k) => hay.includes(k)) && isInvalidRequest;
+  const passThrough = multimodal.some((k) => hay.includes(k)) && isInvalidRequest;
+  // DeepSeek thinking mode: a multi-turn request MUST echo back the previous
+  // assistant's reasoning_content; if the client drops it the request fails
+  // deterministically. Retrying (with or without an API key) cannot fix the
+  // missing field, but switching to key mode would also be useless and would
+  // burn the no-key pool, so the error is marked retry-only: the retry
+  // ladder runs, key mode is never entered on its account.
+  const retryOnly = isInvalidRequest && hay.includes("reasoning_content") && hay.includes("must be passed back");
   const truncated = text.length > 2048 ? text.slice(0, 2048) + "…" : text;
   resp.body = new Blob([truncated]).stream();
-  return { passthrough, type: errorType, code: errorCode, message: errorMessage, body: truncated };
+  return { passThrough, retryOnly, type: errorType, code: errorCode, message: errorMessage, body: truncated };
 }
 
 async function readAllText(stream: ReadableStream<Uint8Array>): Promise<string> {

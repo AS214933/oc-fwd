@@ -449,7 +449,7 @@ describe("tool call sequence normalization", () => {
     mock.clear();
     mock.setHandler(async (ctx) => {
       if (ctx.path === "/chat/completions") {
-        const req = ctx.body as { messages: Array<{ role: string; tool_calls?: Array<{ id: string }>; tool_call_id?: string }> };
+        const req = ctx.body as { messages: Array<{ role: string; tool_calls?: Array<{ id: string }>; tool_call_id?: string; content?: string }> };
         const emptyTool = req.messages.filter((m) => m.role === "tool" && m.content === "" && m.tool_call_id === "call_1");
         const answered = req.messages.filter((m) => m.role === "tool" && m.tool_call_id === "call_1" && m.content !== "");
         // The proxy must have inserted exactly one empty tool message for the unanswered call
@@ -504,7 +504,7 @@ describe("protocol correctness with tools", () => {
   test("responses function_call_input -> chat tool message round trip", async () => {
     mock.setHandler(async (ctx) => {
       if (ctx.path === "/chat/completions") {
-        const req = ctx.body as { messages: Array<{ role: string; tool_calls?: Array<{ id: string }>; tool_call_id?: string }> };
+        const req = ctx.body as { messages: Array<{ role: string; tool_calls?: Array<{ id: string }>; tool_call_id?: string; content?: string }> };
         return jsonResponse(
           chatCompletionJson(ctx.model, "let me check", [
             { id: "call_9", name: "lookup", arguments: JSON.stringify({ q: "x" }) },
@@ -623,6 +623,43 @@ describe("retry + fallback", () => {
     const secondCalls = mock.requests.filter((r) => r.path === "/chat/completions");
     expect(secondCalls.length).toBe(1);
     expect(secondCalls[0]?.headers.get("Authorization")).toContain("key-later");
+  });
+
+  test("deepseek reasoning_content error retries without switching to API key", async () => {
+    mock.clear();
+    // Every anonymous and keyed call returns the same deterministic 400:
+    // the client did not echo back reasoning_content. The proxy must NOT
+    // flip the model into key mode for this error class.
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") {
+        return jsonResponse({
+          error: {
+            message: "The `reasoning_content` in the thinking mode must be passed back to the API.",
+            type: "invalid_request_error",
+            code: "invalid_request_error",
+          },
+        }, 400);
+      }
+      return jsonResponse({});
+    });
+    const cfg = await testConfig({ apiKeys: ["key-deepseek"], retryMax: 2, retryBaseBackoffMs: 5, retryMaxBackoffMs: 10 });
+    const { url: u } = await startProxy(cfg);
+    const res = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(400);
+    // The request retried (attempt 0 + 2 retries = 3 upstream calls)...
+    const calls = mock.requests.filter((r) => r.path === "/chat/completions");
+    expect(calls.length).toBe(3);
+    // ...but never with the API key, and the model must not be in key mode.
+    const keyed = calls.filter((r) => r.headers.get("Authorization")?.includes("key-deepseek"));
+    expect(keyed.length).toBe(0);
+    const modes = await fetch(`${u}/debug/modes`, { headers: { "X-Status-Token": "" } });
+    const body = (await modes.json()) as { models: Array<{ model: string; state: string }> };
+    const ds = body.models.find((m) => m.model === "deepseek-v4-flash-free");
+    expect(ds?.state).toBe("anonymous");
   });
 
   test("concurrent 429s don't truncate in-flight retries when the circuit opens", async () => {
