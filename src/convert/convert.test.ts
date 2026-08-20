@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { responsesToChatRequest, chatToResponsesRequest } from "./responses";
 import { messagesToChatRequest, chatToMessagesRequest } from "./messages";
+import { parseChatRequest } from "./chat";
 import { chatToGeminiRequest } from "./gemini";
 import { chatChunksToResponses, responsesToChatChunks, chatChunksToMessages, chatChunksToGemini, readSSE, type SseEvent } from "./stream";
 import type { ChatChunk } from "./types";

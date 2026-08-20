@@ -444,6 +444,62 @@ describe("streaming", () => {
   }, 20000);
 });
 
+describe("tool call sequence normalization", () => {
+  test("chat inbound: assistant tool_calls without tool result is patched before upstream", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") {
+        const req = ctx.body as { messages: Array<{ role: string; tool_calls?: Array<{ id: string }>; tool_call_id?: string }> };
+        const emptyTool = req.messages.filter((m) => m.role === "tool" && m.content === "" && m.tool_call_id === "call_1");
+        const answered = req.messages.filter((m) => m.role === "tool" && m.tool_call_id === "call_1" && m.content !== "");
+        // The proxy must have inserted exactly one empty tool message for the unanswered call
+        return jsonResponse(chatCompletionJson(ctx.model, JSON.stringify({ emptyTool: emptyTool.length, answered: answered.length, total: req.messages.length })));
+      }
+      return jsonResponse({});
+    });
+    const res = await post({
+      model: "deepseek-v4-flash-free",
+      stream: false,
+      messages: [
+        { role: "user", content: "use search" },
+        { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: "{}" } }] },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    const info = JSON.parse(body.choices[0]?.message.content ?? "{}") as { emptyTool: number; answered: number; total: number };
+    expect(info.emptyTool).toBe(1);
+    expect(info.answered).toBe(0);
+  });
+
+  test("chat inbound: properly paired tool calls stay untouched", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/chat/completions") {
+        const req = ctx.body as { messages: Array<{ role: string; tool_calls?: Array<{ id: string }>; tool_call_id?: string; content?: string }> };
+        const toolMsgs = req.messages.filter((m) => m.role === "tool");
+        const empty = toolMsgs.filter((m) => m.content === "" && m.tool_call_id === "call_1");
+        return jsonResponse(chatCompletionJson(ctx.model, JSON.stringify({ empty, paired: toolMsgs.length })));
+      }
+      return jsonResponse({});
+    });
+    const res = await post({
+      model: "deepseek-v4-flash-free",
+      stream: false,
+      messages: [
+        { role: "user", content: "use search" },
+        { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: "{}" } }] },
+        { role: "tool", tool_call_id: "call_1", content: "found it" },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    const info = JSON.parse(body.choices[0]?.message.content ?? "{}") as { empty: unknown[]; paired: number };
+    expect(info.empty).toHaveLength(0);
+    expect(info.paired).toBe(1);
+  });
+});
+
 describe("protocol correctness with tools", () => {
   test("responses function_call_input -> chat tool message round trip", async () => {
     mock.setHandler(async (ctx) => {

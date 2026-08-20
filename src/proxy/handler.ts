@@ -14,7 +14,7 @@ import { Reporter } from "./reporter";
 import { UpstreamClient, CircuitOpenError, type UpstreamResponse } from "./upstream";
 import { makeLookup } from "./dial";
 import { parseChatRequest, renderChatRequest, renderChatCompletion, parseChatCompletion, type ChatCompletion, type ChatRequest } from "../convert/chat";
-import { parseResponsesRequest, responsesToChatRequest, chatToResponsesRequest, parseResponsesResponse, renderChatCompletionAsResponses } from "../convert/responses";
+import { parseResponsesRequest, responsesToChatRequest, chatToResponsesRequest, parseResponsesResponse, renderChatCompletionAsResponses, normalizeToolCallSequence } from "../convert/responses";
 import { parseMessagesRequest, messagesToChatRequest, chatToMessagesRequest, parseMessagesResponse, renderChatCompletionAsMessages } from "../convert/messages";
 import { chatToGeminiRequest, parseGeminiResponse } from "../convert/gemini";
 import {
@@ -147,6 +147,11 @@ export class Proxy {
     try {
       chatReq = this.toChatRequest(format, raw);
       chatReq.model = upstreamModel;
+      // Some clients (opencode / codex agents) replay an assistant tool_calls
+      // message whose tool results were not persisted into the next request.
+      // Upstream stays legal by filling empty tool responses for every
+      // unanswered call_id; paired calls are untouched.
+      normalizeToolCallSequence(chatReq.messages);
     } catch (err) {
       return errorResponse(400, `cannot convert request to chat completions: ${String(err)}`, "invalid_request_error");
     }

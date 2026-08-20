@@ -139,7 +139,7 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
  * Fill in empty tool responses so the sequence stays valid; already-paired
  * calls are left untouched.
  */
-function normalizeToolCallSequence(messages: ChatMessage[]) {
+export function normalizeToolCallSequence(messages: ChatMessage[]) {
   // Pass 1: every tool_call_id that is answered by a role="tool" message
   // anywhere in the request.
   const answered = new Set<string>();
