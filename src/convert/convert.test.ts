@@ -220,7 +220,7 @@ describe("chat -> responses request", () => {
     expect(output[0]).toEqual({
       id: "rs_1",
       type: "reasoning",
-      summary: [],
+      summary: [{ type: "summary_text", text: "check the workspace" }],
       content: [{ type: "reasoning_text", text: "check the workspace" }],
     });
     expect(output[1]?.type).toBe("function_call");
@@ -489,11 +489,17 @@ describe("chat chunk -> responses SSE", () => {
     const events = await collectEvents(chatChunksToResponses(chunks()));
     const data = events.map((e) => JSON.parse(e.data) as Record<string, unknown>);
     expect(data.some((event) => event.type === "response.reasoning_text.delta" && event.delta === "inspect ")).toBe(true);
+    expect(data.some((event) => event.type === "response.reasoning_summary_text.delta" && event.delta === "inspect ")).toBe(true);
+    const summaryAdded = data.find((event) => event.type === "response.reasoning_summary_part.added");
+    expect(summaryAdded).toBeDefined();
+    const summaryDone = data.find((event) => event.type === "response.reasoning_summary_part.done");
+    expect(summaryDone?.part).toEqual({ type: "summary_text", text: "inspect files" });
     const reasoningDone = data.find((event) => {
       const item = event.item as Record<string, unknown> | undefined;
       return event.type === "response.output_item.done" && item?.type === "reasoning";
     });
     expect(reasoningDone?.item).toMatchObject({
+      summary: [{ type: "summary_text", text: "inspect files" }],
       content: [{ type: "reasoning_text", text: "inspect files" }],
     });
   });

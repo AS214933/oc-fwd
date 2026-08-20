@@ -378,7 +378,7 @@ export function renderChatCompletionAsResponses(completion: ChatCompletion): Rec
   const output: unknown[] = [];
   const msg = completion.choices[0]?.message;
   if (msg?.reasoning_content) {
-    output.push(responsesReasoningItem(msg.reasoning_content));
+    output.push(responsesReasoningItem(msg.reasoning_content, true));
   }
   if (msg && (msg.content !== "" || !msg.tool_calls?.length)) {
     output.push({
@@ -403,11 +403,11 @@ export function renderChatCompletionAsResponses(completion: ChatCompletion): Rec
   return out;
 }
 
-function responsesReasoningItem(content: string): Record<string, unknown> {
+function responsesReasoningItem(content: string, withSummary = false): Record<string, unknown> {
   return {
     id: "rs_1",
     type: "reasoning",
-    summary: [],
+    summary: withSummary ? [{ type: "summary_text", text: content }] : [],
     content: [{ type: "reasoning_text", text: content }],
   };
 }

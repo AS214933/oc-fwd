@@ -416,6 +416,7 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
   let msgAdded = false;
   let text = "";
   let reasoningAdded = false;
+  let summaryAdded = false;
   let reasoning = "";
   let toolSeen = 0;
   const tools = new Map<number, ResponsesToolState>();
@@ -452,7 +453,7 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
   const reasoningItem = (content: string): Record<string, unknown> => ({
     id: "rs_1",
     type: "reasoning",
-    summary: [],
+    summary: content ? [{ type: "summary_text", text: content }] : [],
     content: content ? [{ type: "reasoning_text", text: content }] : [],
   });
 
@@ -463,6 +464,15 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
     const output: unknown[] = [];
     if (reasoning) {
       const item = reasoningItem(reasoning);
+      if (summaryAdded) {
+        events.push(event("response.reasoning_summary_text.done", {
+          item_id: "rs_1", output_index: 0, content_index: 0, text: reasoning,
+        }));
+        events.push(event("response.reasoning_summary_part.done", {
+          item_id: "rs_1", output_index: 0, content_index: 0,
+          part: { type: "summary_text", text: reasoning },
+        }));
+      }
       events.push(event("response.output_item.done", { output_index: 0, item }));
       output.push(item);
     }
@@ -514,6 +524,16 @@ export async function* chatChunksToResponses(chunks: AsyncGenerator<ChatChunk>):
       }
       reasoning += d.reasoning_content;
       yield event("response.reasoning_text.delta", {
+        item_id: "rs_1", output_index: 0, content_index: 0, delta: d.reasoning_content,
+      });
+      if (!summaryAdded) {
+        summaryAdded = true;
+        yield event("response.reasoning_summary_part.added", {
+          item_id: "rs_1", output_index: 0, content_index: 0,
+          summary: [{ type: "summary_text", text: "" }],
+        });
+      }
+      yield event("response.reasoning_summary_text.delta", {
         item_id: "rs_1", output_index: 0, content_index: 0, delta: d.reasoning_content,
       });
     }
@@ -791,7 +811,8 @@ export function renderResponsesEventsFromCompletion(completion: ChatCompletion):
   const msg = completion.choices[0]?.message;
   if (msg?.reasoning_content) {
     output.push({
-      id: "rs_1", type: "reasoning", summary: [],
+      id: "rs_1", type: "reasoning",
+      summary: [{ type: "summary_text", text: msg.reasoning_content }],
       content: [{ type: "reasoning_text", text: msg.reasoning_content }],
     });
   }

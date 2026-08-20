@@ -82,6 +82,10 @@ zenproxy 把各协议的"思考内容"归一化为 canonical 的 `reasoning_cont
 | Anthropic Messages | `type:"thinking"` 块（流式 `thinking_delta`） | `type:"thinking"` 块（流式 `content_block_start` / `thinking_delta` / `content_block_stop`） |
 | Gemini | `part.thought === true` 的文本部分 | `{ text, thought: true }` 部分 |
 
+- Responses 出站会在 `reasoning` 条目里同步填充 `summary`（`summary_text`），并流式
+  发送 `response.reasoning_summary_part.added` / `response.reasoning_summary_text.delta`
+  / `response.reasoning_summary_part.done`，让 Codex 这类只渲染摘要的客户端也能把
+  deepseek 的思考内容直接展示给用户（摘要内容 = 完整 `reasoning_content`）。
 - Anthropic 的 thinking `signature` 会随 canonical 往返保留（`reasoning_signature`），
   claude→claude 多轮续聊仍能按原样把 thinking 块（含签名）回传给上游；跨协议
   合成（deepseek / gemini / gpt 思考 → claude 上游）的 thinking 块没有签名。
