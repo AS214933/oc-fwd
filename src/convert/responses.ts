@@ -117,9 +117,16 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
       const role = chatRole(item.role ?? "");
       const text = contentToString(item.content) || item.text || "";
       if (role && (item.type === "message" || item.content !== undefined || text !== "")) {
-        out.messages.push({ role: role || "user", content: text });
+        const reasoningContent = role === "assistant"
+          ? pendingReasoning || item.reasoning_content || ""
+          : "";
+        out.messages.push({
+          role: role || "user",
+          content: text,
+          ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+        });
       }
-      if (role !== "assistant") pendingReasoning = "";
+      pendingReasoning = "";
     }
   } else {
     throw new Error("unsupported responses input");
@@ -203,18 +210,24 @@ export function chatToResponsesRequest(req: ChatRequest): Record<string, unknown
       input.push({ type: "function_call_output", call_id: msg.tool_call_id ?? "", output: msg.content });
       continue;
     }
-    if (msg.role === "assistant" && msg.tool_calls?.length) {
+    if (msg.role === "assistant") {
       if (msg.reasoning_content) input.push(responsesReasoningItem(msg.reasoning_content));
+      if (msg.tool_calls?.length) {
+        if (msg.content) {
+          input.push({ type: "message", role: "assistant", content: msg.content });
+        }
+        for (const tc of msg.tool_calls) {
+          input.push({
+            type: "function_call",
+            call_id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          });
+        }
+        continue;
+      }
       if (msg.content) {
         input.push({ type: "message", role: "assistant", content: msg.content });
-      }
-      for (const tc of msg.tool_calls) {
-        input.push({
-          type: "function_call",
-          call_id: tc.id,
-          name: tc.function.name,
-          arguments: tc.function.arguments,
-        });
       }
       continue;
     }
@@ -268,7 +281,7 @@ export function parseResponsesResponse(data: Record<string, unknown>): ChatCompl
     }
   }
   if (toolCalls.length > 0) message.tool_calls = toolCalls;
-  if (reasoningContent && toolCalls.length > 0) message.reasoning_content = reasoningContent;
+  if (reasoningContent) message.reasoning_content = reasoningContent;
   const usage = (data.usage ?? {}) as Record<string, unknown>;
   return {
     id: typeof data.id === "string" ? data.id : "resp_1",
@@ -306,7 +319,7 @@ export function renderChatCompletionAsResponses(completion: ChatCompletion): Rec
   };
   const output: unknown[] = [];
   const msg = completion.choices[0]?.message;
-  if (msg?.reasoning_content && msg.tool_calls?.length) {
+  if (msg?.reasoning_content) {
     output.push(responsesReasoningItem(msg.reasoning_content));
   }
   if (msg && (msg.content !== "" || !msg.tool_calls?.length)) {

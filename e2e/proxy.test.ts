@@ -744,7 +744,7 @@ describe("DeepSeek reasoning_content replay", () => {
       "/v1/responses",
     );
     expect(second.status).toBe(200);
-    expect(forwardedReasoning).toBeUndefined();
+    expect(forwardedReasoning).toBe(" ");
   });
 
   test("replays cached reasoning for a Chat Completions stream", async () => {
@@ -784,6 +784,97 @@ describe("DeepSeek reasoning_content replay", () => {
     });
     expect(second.status).toBe(200);
     expect(replayedReasoning).toBe("inspect direct chat state");
+  });
+
+  test("fills missing reasoning for a streamed DeepSeek text-only turn", async () => {
+    mock.clear();
+    let forwardedReasoning: string | undefined;
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      if (ctx.stream) {
+        return chatSSE(ctx.model, [
+          { reasoning: "inspect the request" },
+          { content: "The request is valid." },
+        ]);
+      }
+      const req = ctx.body as { messages: Array<{ role: string; content?: string; reasoning_content?: string }> };
+      forwardedReasoning = req.messages.find((message) => message.role === "assistant" && message.content === "The request is valid.")?.reasoning_content;
+      if (forwardedReasoning === " ") return jsonResponse(chatCompletionJson(ctx.model, "continued"));
+      return jsonResponse({
+        error: {
+          message: "The `reasoning_content` in the thinking mode must be passed back to the API.",
+          type: "invalid_request_error",
+        },
+      }, 400);
+    });
+
+    const first = await post({
+      model: "deepseek-v4-flash-free",
+      messages: [{ role: "user", content: "inspect" }],
+      stream: true,
+    });
+    expect(first.status).toBe(200);
+    await collectData(first);
+
+    const second = await post({
+      model: "deepseek-v4-flash-free",
+      messages: [
+        { role: "user", content: "inspect" },
+        { role: "assistant", content: "The request is valid." },
+        { role: "user", content: "continue" },
+      ],
+    });
+    expect(second.status).toBe(200);
+    expect(forwardedReasoning).toBe(" ");
+  });
+
+  test("keeps non-streaming Responses reasoning for a text-only follow-up", async () => {
+    mock.clear();
+    let forwardedReasoning: string | undefined;
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      const req = ctx.body as { messages: Array<{ role: string; content?: string; reasoning_content?: string }> };
+      const previous = req.messages.find((message) => message.role === "assistant" && message.content === "The request is valid.");
+      if (previous) {
+        forwardedReasoning = previous.reasoning_content;
+        if (forwardedReasoning === "inspect the request") return jsonResponse(chatCompletionJson(ctx.model, "continued"));
+        return jsonResponse({ error: { message: "The `reasoning_content` in the thinking mode must be passed back to the API." } }, 400);
+      }
+      return jsonResponse({
+        id: "chatcmpl_1",
+        object: "chat.completion",
+        model: ctx.model,
+        created: 1,
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "The request is valid.",
+            reasoning_content: "inspect the request",
+          },
+          finish_reason: "stop",
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    });
+
+    const first = await post({ model: "deepseek-v4-flash-free", input: "inspect" }, "/v1/responses");
+    expect(first.status).toBe(200);
+    const firstBody = await first.json() as { output: Array<Record<string, unknown>> };
+    expect(firstBody.output[0]).toMatchObject({
+      type: "reasoning",
+      content: [{ type: "reasoning_text", text: "inspect the request" }],
+    });
+
+    const second = await post({
+      model: "deepseek-v4-flash-free",
+      input: [
+        ...firstBody.output,
+        { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+      ],
+    }, "/v1/responses");
+    expect(second.status).toBe(200);
+    expect(forwardedReasoning).toBe("inspect the request");
   });
 });
 

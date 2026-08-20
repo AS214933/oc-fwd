@@ -22,12 +22,14 @@ zenproxy 针对 opencode zen 网关（`https://opencode.ai/zen/v1`）及其背�
 **触发**：所有模型 ID 以 `deepseek-` 开头的 DeepSeek 系列（包括 flash、pro、free）开 thinking 模式时，多轮对话
 **必须**把上一轮 assistant 的 `reasoning_content` 原样带回；否则上游返回：
 `The \`reasoning_content\` in the thinking mode must be passed back to the API.`
-**适配**：对于 `/v1/responses` 入站，代理保留 Codex 返回/回传的
-`type:"reasoning"` 原始 `reasoning_text`，在下一轮把它附回同一条 assistant
-`tool_calls` 消息的 `reasoning_content` 字段。此往返同时覆盖普通 JSON 与 SSE，
-并只在 DeepSeek Chat 上游发送该专用字段。若某个 Responses 兼容路径仍漏掉该条目，
-代理会在 10 分钟内按 `call_id` 回放刚收到的原文；没有可匹配的近期工具调用时，才将
-该确定性 400 直接原样返回，不重试、不触发匿名→API key 回退。
+**适配**：代理保留 Codex 返回/回传的 `type:"reasoning"` 原始 `reasoning_text`，
+在下一轮把它附回同一条 assistant 消息（包括普通文本与 `tool_calls`）的
+`reasoning_content` 字段。此往返同时覆盖普通 JSON 与 SSE，并只在 DeepSeek Chat 上游发送
+该专用字段。对于客户端
+丢失原文的工具调用，代理会在 10 分钟内按 `call_id` 回放刚收到的原文；DeepSeek 还会
+校验没有工具调用的普通 assistant 历史消息，因此任何仍缺此字段的 assistant 消息会补
+单个空格作为兼容占位。这样不会把这个 DeepSeek 专用字段泄漏给其他模型，也优先保留
+真实思考内容；只有无法恢复的旧历史才会降级为占位。
 
 **判定关键字**：`reasoning_content` + `must be passed back`，且错误为
 `invalid_request_error`。

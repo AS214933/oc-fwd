@@ -99,6 +99,21 @@ describe("responses -> chat request", () => {
     });
   });
 
+  test("replays raw reasoning on a text-only assistant message", () => {
+    const req = responsesToChatRequest({
+      model: "deepseek-v4-flash-free",
+      input: [
+        { type: "reasoning", content: [{ type: "reasoning_text", text: "inspect the repository" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "The repository is ready." }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+      ],
+    });
+    expect(req.messages).toEqual([
+      { role: "assistant", content: "The repository is ready.", reasoning_content: "inspect the repository" },
+      { role: "user", content: "continue" },
+    ]);
+  });
+
   test("instructions + input items + tools", () => {
     const req = responsesToChatRequest({
       model: "gpt-5.4",
@@ -181,6 +196,24 @@ describe("chat -> responses request", () => {
       content: [{ type: "reasoning_text", text: "check the workspace" }],
     });
     expect(output[1]?.type).toBe("function_call");
+  });
+
+  test("preserves text-only assistant reasoning as a Responses item", () => {
+    const completion = parseChatCompletion({
+      id: "chat_1",
+      model: "deepseek-v4-flash-free",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "The repository is ready.", reasoning_content: "inspect the repository" },
+        finish_reason: "stop",
+      }],
+    });
+    const output = renderChatCompletionAsResponses(completion).output as Array<Record<string, unknown>>;
+    expect(output[0]).toMatchObject({
+      type: "reasoning",
+      content: [{ type: "reasoning_text", text: "inspect the repository" }],
+    });
+    expect(output[1]).toMatchObject({ type: "message", role: "assistant" });
   });
 });
 

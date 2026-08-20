@@ -740,7 +740,7 @@ export function renderResponsesEventsFromCompletion(completion: ChatCompletion):
   };
   const output: unknown[] = [];
   const msg = completion.choices[0]?.message;
-  if (msg?.reasoning_content && msg.tool_calls?.length) {
+  if (msg?.reasoning_content) {
     output.push({
       id: "rs_1", type: "reasoning", summary: [],
       content: [{ type: "reasoning_text", text: msg.reasoning_content }],

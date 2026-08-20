@@ -272,6 +272,10 @@ export class Proxy {
         if (restored > 0) {
           this.log.debug("replayed DeepSeek reasoning_content from tool-call cache", { model: upstreamModel, messages: restored });
         }
+        const filled = fillMissingDeepSeekReasoning(chatReq.messages);
+        if (filled > 0) {
+          this.log.debug("filled missing DeepSeek reasoning_content", { model: upstreamModel, messages: filled });
+        }
         this.reasoningReplay.rememberMessages(upstreamModel, chatReq.messages);
       }
       // Some clients (opencode / codex agents) replay an assistant tool_calls
@@ -623,6 +627,22 @@ function responsesKeepaliveEvent(): SseEvent {
 
 function isDeepSeekModel(model: string): boolean {
   return model.toLowerCase().startsWith("deepseek-");
+}
+
+/**
+ * DeepSeek V4 thinking mode validates every assistant message in the replayed
+ * history, including ordinary text turns with no tool calls. Preserve the
+ * upstream reasoning whenever it is available; a single space is the minimum
+ * accepted placeholder when an older client turn has already lost it.
+ */
+function fillMissingDeepSeekReasoning(messages: ChatMessage[]): number {
+  let filled = 0;
+  for (const message of messages) {
+    if (message.role !== "assistant" || message.reasoning_content) continue;
+    message.reasoning_content = " ";
+    filled++;
+  }
+  return filled;
 }
 
 function withoutReasoningContent(req: ChatRequest): ChatRequest {
