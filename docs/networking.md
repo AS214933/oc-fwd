@@ -18,7 +18,7 @@
 
 ## 流式响应快路径（chat→chat 直通）
 
-- 上游协议与客户端协议都是 Chat Completions、且不需要模型别名重写时，流式响应**不再解析 / 重建 SSE**：上游 `data:` 事件原样转发，仅在需要时补 `data: [DONE]`（上游流中断时兜底补发）。deepseek / mimo / glm 等免费 chat 模型都走这条路径；
+- 上游协议与客户端协议都是 Chat Completions、且不需要模型别名重写时，流式响应**不再解析 / 重建 SSE**：上游 `data:` 事件原样转发，仅在需要时补 `data: [DONE]`（上游流中断时兜底补发）。除 DeepSeek 外的 chat 模型走这条路径；DeepSeek 流会经过轻量解析，以短暂保存 thinking 模式工具调用所需的 `reasoning_content`。
 - 有协议转换（例如入站 `/v1/responses` → 上游 `/v1/chat/completions`、或出站 gemini / messages）时，仍走解析 → 规范化 ChatChunk → 重编码管线，但 `readSSE` 已改为滑动窗口消费，避免高吞吐下逐行 `slice` 的 O(n²) 拷贝。
 
 ## 判断每次连接是否真的走了 IPv6

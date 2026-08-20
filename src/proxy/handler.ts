@@ -27,10 +27,76 @@ import {
 
 /** Status visibility window: a model only shows up if routed within this span. */
 const STATUS_WINDOW_MS = 24 * 60 * 60 * 1000;
-import type { ChatChunk } from "../convert/types";
+import type { ChatChunk, ChatMessage } from "../convert/types";
 
 type InboundFormat = "chat" | "responses" | "messages";
 type OutboundProtocol = "chat" | "responses" | "messages" | "gemini";
+
+const REASONING_REPLAY_TTL_MS = 10 * 60 * 1000;
+const MAX_REASONING_REPLAY_ENTRIES = 2048;
+
+/**
+ * DeepSeek identifies the interrupted thinking turn by its tool call IDs.
+ * Codex normally replays the paired reasoning item, but some Responses
+ * compatibility paths omit it. Retain it briefly so the next tool-result
+ * request can still reconstruct the required assistant message.
+ */
+class DeepSeekReasoningReplay {
+  private entries = new Map<string, { content: string; expiresAt: number }>();
+
+  rememberMessages(model: string, messages: ChatMessage[]) {
+    for (const message of messages) {
+      if (message.role !== "assistant" || !message.reasoning_content || !message.tool_calls?.length) continue;
+      this.rememberToolCalls(model, message.tool_calls.map((call) => call.id), message.reasoning_content);
+    }
+  }
+
+  rememberToolCalls(model: string, callIds: Iterable<string>, content: string) {
+    if (!content) return;
+    this.prune();
+    const expiresAt = Date.now() + REASONING_REPLAY_TTL_MS;
+    for (const callId of callIds) {
+      if (!callId) continue;
+      const key = this.key(model, callId);
+      this.entries.delete(key);
+      this.entries.set(key, { content, expiresAt });
+    }
+    while (this.entries.size > MAX_REASONING_REPLAY_ENTRIES) {
+      const oldest = this.entries.keys().next().value;
+      if (!oldest) break;
+      this.entries.delete(oldest);
+    }
+  }
+
+  restoreMessages(model: string, messages: ChatMessage[]): number {
+    this.prune();
+    let restored = 0;
+    for (const message of messages) {
+      if (message.role !== "assistant" || message.reasoning_content || !message.tool_calls?.length) continue;
+      const candidates = message.tool_calls
+        .map((call) => this.entries.get(this.key(model, call.id))?.content)
+        .filter((content): content is string => typeof content === "string" && content !== "");
+      const content = candidates[0];
+      // A parallel tool-call assistant message has one reasoning trace. Only
+      // reconstruct it when every call in that exact message maps to it.
+      if (!content || candidates.length !== message.tool_calls.length || candidates.some((candidate) => candidate !== content)) continue;
+      message.reasoning_content = content;
+      restored++;
+    }
+    return restored;
+  }
+
+  private prune() {
+    const now = Date.now();
+    for (const [key, entry] of this.entries) {
+      if (entry.expiresAt <= now) this.entries.delete(key);
+    }
+  }
+
+  private key(model: string, callId: string): string {
+    return `${model}\u0000${callId}`;
+  }
+}
 
 /**
  * Decide which models the status page should surface. Only models actually
@@ -82,6 +148,7 @@ export class Proxy {
   private upstream: UpstreamClient;
   private reporter?: Reporter;
   private sem: Semaphore;
+  private reasoningReplay = new DeepSeekReasoningReplay();
 
   constructor(
     private cfg: Config,
@@ -200,6 +267,13 @@ export class Proxy {
     try {
       chatReq = this.toChatRequest(format, raw);
       chatReq.model = upstreamModel;
+      if (isDeepSeekModel(upstreamModel)) {
+        const restored = this.reasoningReplay.restoreMessages(upstreamModel, chatReq.messages);
+        if (restored > 0) {
+          this.log.debug("replayed DeepSeek reasoning_content from tool-call cache", { model: upstreamModel, messages: restored });
+        }
+        this.reasoningReplay.rememberMessages(upstreamModel, chatReq.messages);
+      }
       // Some clients (opencode / codex agents) replay an assistant tool_calls
       // message whose tool results were not persisted into the next request.
       // Upstream stays legal by filling empty tool responses for every
@@ -236,15 +310,17 @@ export class Proxy {
 
     if (clientStream || respSSE) {
       if (respSSE) {
-        return this.respondStreaming(resp, outboundProtocol, format, alias);
+        return this.respondStreaming(resp, outboundProtocol, format, alias, upstreamModel);
       }
       // Upstream ignored stream=true and returned a single JSON body: emit a
       // minimal SSE sequence so streaming clients still get valid events.
       const completion = await this.parseUpstreamCompletion(outboundProtocol, await readAllText(resp.body));
+      this.rememberDeepSeekCompletion(upstreamModel, completion);
       return this.respondSSEFromCompletion(completion, format, alias);
     }
 
     const completion = await this.parseUpstreamCompletion(outboundProtocol, await readAllText(resp.body));
+    this.rememberDeepSeekCompletion(upstreamModel, completion);
     return this.nonStreamingResponse(completion, format, alias);
   }
 
@@ -318,13 +394,14 @@ export class Proxy {
     upstreamProtocol: OutboundProtocol,
     clientFormat: InboundFormat,
     alias: string,
+    upstreamModel: string,
   ): Response {
     // chat -> chat passthrough: the upstream event stream is already exactly
     // what a Chat Completions client expects, so forward it byte-for-byte
     // instead of parsing every chunk, normalizing it to ChatChunk and re-
-    // serializing it. This is the hot path for zen free models (deepseek /
-    // mimo / glm / ...), which come back as OpenAI Chat Completions SSE.
-    if (upstreamProtocol === "chat" && clientFormat === "chat" && !alias) {
+    // serializing it. This is the hot path for non-DeepSeek Zen chat models
+    // (mimo / glm / ...); DeepSeek is parsed to retain thinking state.
+    if (upstreamProtocol === "chat" && clientFormat === "chat" && !alias && !isDeepSeekModel(upstreamModel)) {
       return new Response(ssePassthrough(resp.body, () => resp.destroy?.()), {
         headers: {
           "Content-Type": "text/event-stream",
@@ -348,6 +425,9 @@ export class Proxy {
       default:
         chunks = chatSSEToChunks(events);
         break;
+    }
+    if (isDeepSeekModel(upstreamModel)) {
+      chunks = this.rememberDeepSeekStreamReasoning(upstreamModel, chunks);
     }
     if (alias) chunks = mapChunks(chunks, (ch) => ({ ...ch, model: alias }));
     const sse = encodeChunksToClient(chunks, clientFormat);
@@ -388,6 +468,31 @@ export class Proxy {
         "X-Zen-Proxy": "1",
       },
     });
+  }
+
+  private rememberDeepSeekCompletion(model: string, completion: ChatCompletion) {
+    if (!isDeepSeekModel(model)) return;
+    const message = completion.choices[0]?.message;
+    if (message) this.reasoningReplay.rememberMessages(model, [message]);
+  }
+
+  private async *rememberDeepSeekStreamReasoning(model: string, chunks: AsyncGenerator<ChatChunk>): AsyncGenerator<ChatChunk> {
+    let reasoning = "";
+    const callIds = new Set<string>();
+    for await (const chunk of chunks) {
+      for (const choice of chunk.choices) {
+        reasoning += choice.delta.reasoning_content ?? "";
+        for (const call of choice.delta.tool_calls ?? []) {
+          if (call.id) callIds.add(call.id);
+        }
+      }
+      // Save before yielding the tool-call chunk. A client can start its
+      // follow-up request immediately after seeing the call in the stream.
+      if (reasoning && callIds.size > 0) {
+        this.reasoningReplay.rememberToolCalls(model, callIds, reasoning);
+      }
+      yield chunk;
+    }
   }
 
   private resolveModel(clientModel: string): string | null {

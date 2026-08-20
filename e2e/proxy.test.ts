@@ -661,6 +661,130 @@ describe("DeepSeek reasoning_content replay", () => {
     expect(res.status).toBe(200);
     expect(forwardedReasoning).toBeUndefined();
   });
+
+  test("replays cached reasoning when a Responses client omits it on the tool-result turn", async () => {
+    mock.clear();
+    let replayedReasoning = "";
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      if (ctx.stream) {
+        return chatSSE(ctx.model, [
+          { reasoning: "inspect cached state" },
+          { toolCall: { id: "call_cached", name: "list", arguments: "{}" } },
+        ]);
+      }
+      const req = ctx.body as { messages: Array<{ role: string; reasoning_content?: string; tool_calls?: Array<{ id: string }> }> };
+      replayedReasoning = req.messages.find((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.id === "call_cached"))?.reasoning_content ?? "";
+      if (replayedReasoning === "inspect cached state") return jsonResponse(chatCompletionJson(ctx.model, "cached reasoning accepted"));
+      return jsonResponse({ error: { message: "The `reasoning_content` in the thinking mode must be passed back to the API.", type: "invalid_request_error" } }, 400);
+    });
+
+    const first = await post(
+      { model: "deepseek-v4-flash-free", input: "inspect", stream: true },
+      "/v1/responses",
+    );
+    const events = await collectData(first);
+    const functionCall = events.find((event) => {
+      try {
+        const payload = JSON.parse(event.data) as { type?: string; item?: { type?: string; call_id?: string } };
+        return payload.type === "response.output_item.done" && payload.item?.type === "function_call" && payload.item.call_id === "call_cached";
+      } catch {
+        return false;
+      }
+    });
+    expect(functionCall).toBeDefined();
+    const functionItem = JSON.parse(functionCall!.data) as { item: Record<string, unknown> };
+
+    const second = await post(
+      {
+        model: "deepseek-v4-flash-free",
+        input: [
+          functionItem.item,
+          { type: "function_call_output", call_id: "call_cached", output: "[\"README.md\"]" },
+        ],
+      },
+      "/v1/responses",
+    );
+    expect(second.status).toBe(200);
+    expect(replayedReasoning).toBe("inspect cached state");
+  });
+
+  test("does not apply a partial parallel tool-call cache match", async () => {
+    mock.clear();
+    let forwardedReasoning: string | undefined;
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      if (ctx.stream) {
+        return chatSSE(ctx.model, [
+          { reasoning: "inspect only the first call" },
+          { toolCall: { id: "call_known", name: "list", arguments: "{}" } },
+        ]);
+      }
+      const req = ctx.body as { messages: Array<{ role: string; reasoning_content?: string; tool_calls?: Array<{ id: string }> }> };
+      forwardedReasoning = req.messages.find((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.id === "call_known"))?.reasoning_content;
+      return jsonResponse(chatCompletionJson(ctx.model, "ok"));
+    });
+
+    const first = await post(
+      { model: "deepseek-v4-pro", input: "inspect", stream: true },
+      "/v1/responses",
+    );
+    await collectData(first);
+
+    const second = await post(
+      {
+        model: "deepseek-v4-pro",
+        input: [
+          { type: "function_call", call_id: "call_known", name: "list", arguments: "{}" },
+          { type: "function_call", call_id: "call_unknown", name: "read", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_known", output: "[]" },
+          { type: "function_call_output", call_id: "call_unknown", output: "{}" },
+        ],
+      },
+      "/v1/responses",
+    );
+    expect(second.status).toBe(200);
+    expect(forwardedReasoning).toBeUndefined();
+  });
+
+  test("replays cached reasoning for a Chat Completions stream", async () => {
+    mock.clear();
+    let replayedReasoning = "";
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      if (ctx.stream) {
+        return chatSSE(ctx.model, [
+          { reasoning: "inspect direct chat state" },
+          { toolCall: { id: "call_chat", name: "list", arguments: "{}" } },
+        ]);
+      }
+      const req = ctx.body as { messages: Array<{ role: string; reasoning_content?: string; tool_calls?: Array<{ id: string }> }> };
+      replayedReasoning = req.messages.find((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.id === "call_chat"))?.reasoning_content ?? "";
+      return jsonResponse(chatCompletionJson(ctx.model, "ok"));
+    });
+
+    const first = await post({
+      model: "deepseek-v4-flash",
+      messages: [{ role: "user", content: "inspect" }],
+      stream: true,
+    });
+    await collectData(first);
+
+    const second = await post({
+      model: "deepseek-v4-flash",
+      messages: [
+        { role: "user", content: "inspect" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_chat", type: "function", function: { name: "list", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "call_chat", content: "[\"README.md\"]" },
+      ],
+    });
+    expect(second.status).toBe(200);
+    expect(replayedReasoning).toBe("inspect direct chat state");
+  });
 });
 
 describe("retry + fallback", () => {
