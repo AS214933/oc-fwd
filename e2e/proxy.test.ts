@@ -625,11 +625,10 @@ describe("retry + fallback", () => {
     expect(secondCalls[0]?.headers.get("Authorization")).toContain("key-later");
   });
 
-  test("deepseek reasoning_content error retries without switching to API key", async () => {
+  test("deepseek reasoning_content error passes through without retry or key fallback", async () => {
     mock.clear();
-    // Every anonymous and keyed call returns the same deterministic 400:
-    // the client did not echo back reasoning_content. The proxy must NOT
-    // flip the model into key mode for this error class.
+    // The deterministic 400 (client did not echo back reasoning_content)
+    // must be returned to the client unchanged: no retry, no API-key switch.
     mock.setHandler(async (ctx) => {
       if (ctx.path === "/chat/completions") {
         return jsonResponse({
@@ -642,7 +641,7 @@ describe("retry + fallback", () => {
       }
       return jsonResponse({});
     });
-    const cfg = await testConfig({ apiKeys: ["key-deepseek"], retryMax: 2, retryBaseBackoffMs: 5, retryMaxBackoffMs: 10 });
+    const cfg = await testConfig({ apiKeys: ["key-deepseek"], retryMax: 3 });
     const { url: u } = await startProxy(cfg);
     const res = await fetch(`${u}/v1/chat/completions`, {
       method: "POST",
@@ -650,13 +649,13 @@ describe("retry + fallback", () => {
       body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
     });
     expect(res.status).toBe(400);
-    // The request retried (attempt 0 + 2 retries = 3 upstream calls)...
+    // Exactly one upstream call: no retry, and never with the API key.
     const calls = mock.requests.filter((r) => r.path === "/chat/completions");
-    expect(calls.length).toBe(3);
-    // ...but never with the API key, and the model must not be in key mode.
+    expect(calls.length).toBe(1);
     const keyed = calls.filter((r) => r.headers.get("Authorization")?.includes("key-deepseek"));
     expect(keyed.length).toBe(0);
-    const modes = await fetch(`${u}/debug/modes`, { headers: { "X-Status-Token": "" } });
+    // Model must stay anonymous (no anonymous -> keyed switch).
+    const modes = await fetch(`${u}/debug/modes`);
     const body = (await modes.json()) as { models: Array<{ model: string; state: string }> };
     const ds = body.models.find((m) => m.model === "deepseek-v4-flash-free");
     expect(ds?.state).toBe("anonymous");

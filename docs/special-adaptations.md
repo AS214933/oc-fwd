@@ -23,9 +23,9 @@ zenproxy 针对 opencode zen 网关（`https://opencode.ai/zen/v1`）及其背�
 **必须**把上一轮 assistant 的 `reasoning_content` 原样带回；客户端（opencode /
 codex 等）若在下一轮请求里丢弃该字段，上游返回：
 `The \`reasoning_content\` in the thinking mode must be passed back to the API.`
-**适配**：识别该错误后**只走重试阶梯**（默认重试耗尽后把上游 400 原样返回），
-**不触发匿名→API key 回退**、不切 key 模式——因为换 key 同样缺字段，结果必然不变，
-切换只会白白消耗 key 配额并引发后续探测抖动。
+**适配**：识别该错误后**直接原样返回**给客户端——不重试、不进入重试阶梯、
+**不触发匿名→API key 回退**、不切 key 模式。因为重试和换 key 都缺同一个字段，
+结果必然不变，重试只会拖延响应、切换只会白白消耗 key 配额并引发后续探测抖动。
 
 **判定关键字**：`reasoning_content` + `must be passed back`，且错误为
 `invalid_request_error`。
@@ -67,11 +67,11 @@ codex 等）若在下一轮请求里丢弃该字段，上游返回：
 
 - 任何非 200 上游响应都会把**解析后的错误体**打进日志：
   `[WARN] upstream returned non-200 {"status":...,"model":...,"error_type":...,"error_code":...,"error_message":...,"body":"..."}`。
-- `reasoning_content` 类错误额外带 `"retry_only":true`，方便对照本清单判断走了哪条分支。
+- `reasoning_content` 类错误额外带 `"direct_pass_through":true`，方便对照本清单判断走了哪条分支。
 
 ## 判定优先级（non-200 分支）
 
 1. 429 → 重试阶梯（尊重 Retry-After）+ 熔断
-2. 多模态确定性 400 → **原样透传**
-3. `reasoning_content` 确定性 400 → **只重试，不切 key**
+2. 多模态确定性 400 → **直接原样返回**
+3. `reasoning_content` 确定性 400 → **直接原样返回**（不重试、不切 key）
 4. 其他非 200 → 重试阶梯耗尽后，匿名模式自动切 key 重试一次（fail-fast）
