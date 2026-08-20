@@ -11,9 +11,15 @@
 `ZEN_ROTATE_IP=true` 时**不复用 socks5 连接**，而是把每次新建连接的固定成本压下去：
 
 - **拼接式 socks5 握手**：greeting / 鉴权 / CONNECT 一次写完，少等 2~3 个 RTT（对比逐段协商），同时拨号受 context 与 `ZEN_DIAL_TIMEOUT_SECONDS` 限制，代理无响应时快速失败而不是让请求堆积；
-- **TLS 会话复用**：同一上游的 TLS ticket 在进程内缓存，新 TCP 连接握手从完整握手降为 1 个 RTT。ticket 跟上游服务器绑定、与客户端出口 IP 无关，所以换出口 IP 不影响复用；socks5 连接本身依然每次新建、绝不复用；
-- **本地 DNS 缓存**：`ZEN_IPV6_PREFER=true` 时高并发下大量相同域名解析会被去重合并（single-flight + TTL），TTL 由 `ZEN_DNS_CACHE_TTL_SECONDS` 控制；
+- **TCP_NODELAY**：socks5 隧道与直连 socket 建立后即关闭 Nagle 聚合，流式响应里每个小 segment（一个 token / 一个 SSE 事件）立即发出，不攒包；
+- **TLS 会话复用**：同一上游的 TLS ticket 在进程内缓存，新 TCP 连接握手从完整握手降为 1 个 RTT（TLS 1.3 下用 session ticket / PSK）。ticket 跟上游服务器绑定、与客户端出口 IP 无关，所以**换出口 IP 不影响复用**；socks5 连接本身依然每次新建、绝不复用；
+- **本地 DNS 缓存**：`ZEN_IPV6_PREFER=true` 时高并发下大量相同域名解析会被去重合并（multi-flight 合并 + TTL），TTL 由 `ZEN_DNS_CACHE_TTL_SECONDS` 控制；
 - **轻量并发控制**：回退状态读取与随机 key 选择均为无锁 / 轻锁路径，避免热路径争用。
+
+## 流式响应快路径（chat→chat 直通）
+
+- 上游协议与客户端协议都是 Chat Completions、且不需要模型别名重写时，流式响应**不再解析 / 重建 SSE**：上游 `data:` 事件原样转发，仅在需要时补 `data: [DONE]`（上游流中断时兜底补发）。deepseek / mimo / glm 等免费 chat 模型都走这条路径；
+- 有协议转换（例如入站 `/v1/responses` → 上游 `/v1/chat/completions`、或出站 gemini / messages）时，仍走解析 → 规范化 ChatChunk → 重编码管线，但 `readSSE` 已改为滑动窗口消费，避免高吞吐下逐行 `slice` 的 O(n²) 拷贝。
 
 ## 判断每次连接是否真的走了 IPv6
 
@@ -25,3 +31,11 @@
    ```
 
 2. `LOG_LEVEL=debug` 时每次拨号打印 `dialed upstream host=... ip=[2606:...]:443 family=ipv6`，带方括号 + 冒号即 IPv6。
+
+## 链路延迟拆解（为什么这些优化让 token 变快）
+
+首 token 延迟 = 建连 + 握手 + 请求上行 + 首 token 下行，逐 token 延迟受下游小包发送时机影响：
+
+- **首 token 更快**：TLS 会话复用把完整握手（1 个 RTT）省成恢复握手（同样 1 个 RTT 但省去证书交换/DHE 的 2~3 个乘法计算 + 大消息交换），真实公网下约省 30~200ms；`TCP_NODELAY` 让每个 SSE 事件立即离开内核，避免 Nagle 等待 ACK 把 40 字节的 token 包压住 40ms。
+- **整体吞吐更高**：chat→chat 直通把"每个 chunk 的 JSON 解析 + 规范化对象分配 + 重新 stringify"整个移除，CPU 从 O(chunk) 分配降到接近零拷贝转发；协议转换路径的 `readSSE` 线性化消除了高吞吐下逐行 `slice` 的二次方拷贝。
+- **随机 socks5 出口不受影响**：连接仍每分钟/每请求新建新建，只是复用与出口 IP 无关的 TLS 凭据。

@@ -14,6 +14,7 @@
 import tls from "node:tls";
 import { Readable } from "node:stream";
 import type { Socket } from "node:net";
+import { cachedTlsSession, rememberTlsSession } from "./dial";
 
 export interface Http1RequestOptions {
   /** Established TCP socket (already routed via socks5 / ipv6-prefer). */
@@ -196,7 +197,7 @@ export function http1Request(opts: Http1RequestOptions): Promise<Http1Result> {
     }
 
     function parseHead() {
-      const idx = buf.indexOf(CRLFCRLF, 0, "latin1");
+      const idx = buf.indexOf(CRLFCRLF);
       if (idx < 0) {
         if (buf.length > 65536) throw new Error("upstream response head too large");
         return;
@@ -288,10 +289,13 @@ export function http1Request(opts: Http1RequestOptions): Promise<Http1Result> {
       sock.write(opts.request);
     }
 
-    const tlsSock = opts.tls ? tls.connect({ socket: opts.tcp, servername: opts.servername }) : null;
+    const tlsSock = opts.tls
+      ? tls.connect({ socket: opts.tcp, servername: opts.servername, session: cachedTlsSession(opts.servername ?? "") })
+      : null;
     if (tlsSock) {
       tlsSock.once("secureConnect", () => {
         sock = tlsSock as typeof sock;
+        rememberTlsSession(opts.servername ?? "", tlsSock.getSession());
         setup();
       });
       tlsSock.once("error", (e) => fail(e instanceof Error ? e : new Error(String(e))));

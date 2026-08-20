@@ -45,6 +45,11 @@ export function socks5Connect(
     let sentConnect = false;
 
     sock.on("connect", () => {
+      try {
+        sock.setNoDelay(true);
+      } catch {
+        /* best effort */
+      }
       if (proxy.username !== undefined) {
         sock.write(Buffer.from([0x05, 0x01, 0x02])); // username/password auth
       } else {
@@ -99,6 +104,11 @@ export function socks5Connect(
         settled = true;
         clearTimeout(timer);
         sock.removeAllListeners("data");
+        try {
+          sock.setNoDelay(true);
+        } catch {
+          /* best effort */
+        }
         resolve(sock);
       }
     });

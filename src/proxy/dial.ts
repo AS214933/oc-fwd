@@ -13,6 +13,27 @@ import { connect as tcpConnect, type LookupFunction, type Socket } from "node:ne
 import { socks5Connect, parseSocks5URL } from "./socks5";
 import type { Config } from "../config";
 
+/** Per-host cache of the most recent TLS session (RFC 5077 ticket). Exposing
+ *  the cached session to a fresh TLS handshake turns the full handshake into
+ *  an abbreviated one (~1 RTT). Tickets are tied to the upstream server, not
+ *  to the client's egress IP, so fresh SOCKS5 connections (new exit IPs)
+ *  still reuse them; the connection itself is never reused across requests,
+ *  which keeps the per-request random SOCKS5 exit intact. */
+const tlsSessionCache = new Map<string, Buffer>();
+
+export function cachedTlsSession(servername: string): Buffer | undefined {
+  const s = tlsSessionCache.get(servername);
+  return s !== undefined && s.length > 0 ? s : undefined;
+}
+
+export function rememberTlsSession(servername: string, session: Buffer | null | undefined) {
+  if (!session || session.length === 0) {
+    tlsSessionCache.delete(servername);
+    return;
+  }
+  tlsSessionCache.set(servername, session);
+}
+
 export function makeLookup(cfg: Config, ttlMs: number): LookupFunction {
   const cache = new Map<string, { expires: number; addresses: dns.LookupAddress[] }>();
   const forceIPv6 = cfg.forceIPv6;
@@ -75,7 +96,9 @@ export async function openUpstreamSocket(
   if (cfg.forceIPv6 || cfg.ipv6Prefer) {
     return connectWithLookup(cfg, opts);
   }
-  return connectTimeout(opts.host, opts.port, opts.timeoutMs);
+  const sock = await connectTimeout(opts.host, opts.port, opts.timeoutMs);
+  sock.setNoDelay(true);
+  return sock;
 }
 
 async function connectWithLookup(
@@ -95,7 +118,9 @@ async function connectWithLookup(
     if (forceIPv6 && addr.family === 4) continue;
     if (!forceIPv6 && addr.family !== 6) continue; // prefer 6 first, v4 only after all v6 failed
     try {
-      return await connectTimeout(addr.address, opts.port, opts.timeoutMs);
+      const sock = await connectTimeout(addr.address, opts.port, opts.timeoutMs);
+      sock.setNoDelay(true);
+      return sock;
     } catch (e) {
       lastErr = e instanceof Error ? e : new Error(String(e));
       if (forceIPv6) throw lastErr;
@@ -105,7 +130,9 @@ async function connectWithLookup(
     for (const addr of addresses) {
       if (addr.family === 6) continue;
       try {
-        return await connectTimeout(addr.address, opts.port, opts.timeoutMs);
+        const sock = await connectTimeout(addr.address, opts.port, opts.timeoutMs);
+        sock.setNoDelay(true);
+        return sock;
       } catch (e) {
         lastErr = e instanceof Error ? e : new Error(String(e));
       }

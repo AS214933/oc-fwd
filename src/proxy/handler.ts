@@ -261,6 +261,20 @@ export class Proxy {
     clientFormat: InboundFormat,
     alias: string,
   ): Response {
+    // chat -> chat passthrough: the upstream event stream is already exactly
+    // what a Chat Completions client expects, so forward it byte-for-byte
+    // instead of parsing every chunk, normalizing it to ChatChunk and re-
+    // serializing it. This is the hot path for zen free models (deepseek /
+    // mimo / glm / ...), which come back as OpenAI Chat Completions SSE.
+    if (upstreamProtocol === "chat" && clientFormat === "chat" && !alias) {
+      return new Response(ssePassthrough(resp.body, () => resp.destroy?.()), {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "X-Zen-Proxy": "1",
+        },
+      });
+    }
     const events = readSSE(resp.body);
     let chunks: AsyncGenerator<ChatChunk>;
     switch (upstreamProtocol) {
@@ -547,6 +561,88 @@ async function* mapChunks(chunks: AsyncGenerator<ChatChunk>, fn: (ch: ChatChunk)
 async function* asyncGen(events: SseEvent[]): AsyncGenerator<SseEvent> {
   for (const ev of events) yield ev;
 }
+
+/**
+ * Byte-level SSE passthrough for the chat -> chat streaming fast path.
+ * All events are forwarded verbatim and [DONE] is guaranteed to reach the
+ * client even if the upstream stream ends without one.
+ */
+export function ssePassthrough(stream: ReadableStream<Uint8Array>, onCancel: () => void): ReadableStream<Uint8Array> {
+  // sawDone: the upstream sent its own [DONE] (either in this stream or a
+  // held-back partial), so nothing more needs to be appended on EOF.
+  let sawDone = false;
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      let tail = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value || value.byteLength === 0) continue;
+          let text = decoder.decode(value, { stream: true });
+          if (tail) {
+            text = tail + text;
+            tail = "";
+          }
+          const doneAt = text.indexOf("[DONE]");
+          if (doneAt >= 0) {
+            // The upstream sent its own terminator: keep the event that ended
+            // right before the marker, strip the marker and everything after
+            // it, and emit a canonical terminator in its place.
+            const evEnd = text.lastIndexOf("\n\n", doneAt);
+            // Keep only the events that ended before the marker (the cut
+            // includes their trailing blank line). If the marker begins a new
+            // event line (no blank line before it), head is empty: the
+            // previous chunk already delivered the full preceding event.
+            const cut = evEnd >= 0 ? evEnd + 2 : 0;
+            const head = text.slice(0, cut);
+            sawDone = true;
+            controller.enqueue(encoderBytes.encode(head));
+            controller.enqueue(encoderBytes.encode("data: [DONE]\n\n"));
+            break;
+          }
+          const lastNl = text.lastIndexOf("\n");
+          const lineTail = (lastNl < 0 ? text : text.slice(lastNl + 1)).replace(/^data: /, "");
+          const lineLen = text.length - (lastNl < 0 ? 0 : lastNl + 1);
+          if (lineTail !== "" && "[DONE]".startsWith(lineTail) && lineTail.length < 6 && lineTail === text.slice(Math.max(0, text.length - lineTail.length))) {
+            // The buffer ends inside a "[DONE]" marker split across TCP
+            // segments (e.g. trailing "[DO"). Hold those bytes back and only
+            // flush what ended cleanly at the previous blank line; the next
+            // chunk completes the marker and the [DONE] branch above handles
+            // it. This avoids re-serializing the stream to find the marker.
+            const bs = lastNl < 0 ? -1 : text.lastIndexOf("\n\n", lastNl);
+            const cut = bs >= 0 ? bs + 2 : 0;
+            if (cut > 0) controller.enqueue(encoderBytes.encode(text.slice(0, cut)));
+            tail = text.slice(cut);
+            continue;
+          }
+          controller.enqueue(encoderBytes.encode(text));
+        }
+        const flushed = decoder.decode();
+        const leftover = tail ? tail + flushed : flushed;
+        // A trailing partial "[DONE]" marker (truncated stream) is nothing: the
+        // canonical terminator below replaces it.
+        const partialMarker = leftover !== "" && "[DONE]".startsWith(leftover) && leftover.length < 6;
+        if (leftover && !partialMarker) controller.enqueue(encoderBytes.encode(leftover));
+        if (!sawDone) {
+          controller.enqueue(encoderBytes.encode("data: [DONE]\n\n"));
+        }
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      } finally {
+        reader.releaseLock();
+      }
+    },
+    cancel() {
+      onCancel();
+    },
+  });
+}
+
+const encoderBytes = new TextEncoder();
 
 function sseToStream(sse: AsyncGenerator<SseEvent>, onCancel: () => void): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();

@@ -19,11 +19,15 @@ export interface SseEvent {
   data: string;
 }
 
-/** Parse an SSE byte stream into events (data:/event: fields, \n\n separated). */
+/** Parse an SSE byte stream into events (data:/event: fields, \n\n separated).
+ *  Consumes bytes from a sliding window instead of re-slicing the whole
+ *  remaining buffer after every line, so high-throughput token streams stay
+ *  linear even when the upstream emits many small events. */
 export async function* readSSE(stream: ReadableStream<Uint8Array>): AsyncGenerator<SseEvent> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buf = "";
+  let start = 0;
   let event = "";
   let dataLines: string[] = [];
   try {
@@ -32,9 +36,9 @@ export async function* readSSE(stream: ReadableStream<Uint8Array>): AsyncGenerat
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       let idx: number;
-      while ((idx = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, idx).replace(/\r$/, "");
-        buf = buf.slice(idx + 1);
+      while ((idx = buf.indexOf("\n", start)) >= 0) {
+        const line = buf.slice(start, idx).replace(/\r$/, "");
+        start = idx + 1;
         if (line === "") {
           if (dataLines.length > 0) {
             yield { event: event || undefined, data: dataLines.join("\n") };
@@ -49,6 +53,12 @@ export async function* readSSE(stream: ReadableStream<Uint8Array>): AsyncGenerat
         const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
         if (field === "event") event = value;
         else if (field === "data") dataLines.push(value);
+      }
+      // Drop consumed bytes once they outgrow a small threshold, keeping the
+      // retained buffer bounded without copying on every line.
+      if (start > 65536) {
+        buf = buf.slice(start);
+        start = 0;
       }
     }
     if (dataLines.length > 0) yield { event: event || undefined, data: dataLines.join("\n") };

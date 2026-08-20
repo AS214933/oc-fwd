@@ -5,7 +5,7 @@
  * CRLF and trailer boundary is split across TCP segments — the exact
  * segmentation that previously stalled or killed the body parser.
  */
-import { test, expect } from "bun:test";
+import { describe, test, expect } from "bun:test";
 import net from "node:net";
 import { Readable } from "node:stream";
 import { http1Request } from "./http1";
@@ -98,4 +98,70 @@ test("parses close-delimited bodies", async () => {
   );
   expect(status).toBe(200);
   expect(body.toString()).toBe("streamed till end");
+});
+
+
+/**
+ * Byte-level SSE passthrough (chat -> chat streaming fast path). The upstream
+ * stream must be forwarded verbatim except for a canonical [DONE] terminator,
+ * including when the marker is split across TCP segments or missing entirely.
+ */
+import { ssePassthrough } from "./handler";
+
+async function passthroughBytes(chunks: string[]): Promise<string> {
+  const src = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const ch of chunks) controller.enqueue(Buffer.from(ch, "utf8"));
+      controller.close();
+    },
+  });
+  const out = ssePassthrough(src, () => {});
+  const reader = out.getReader();
+  const part: string[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) part.push(Buffer.from(value).toString("utf8"));
+  }
+  return part.join("");
+}
+
+describe("sse passthrough", () => {
+  test("forwards ordinary events verbatim and terminates with [DONE]", async () => {
+    const out = await passthroughBytes(["data: hi\n\ndata: [DONE]\n\n"]);
+    expect(out).toBe("data: hi\n\ndata: [DONE]\n\n");
+  });
+
+  test("handles a [DONE] marker split across TCP segments", async () => {
+    const out = await passthroughBytes(["data: hi\n\ndata: [DO", "NE]\n\n"]);
+    expect(out).toBe("data: hi\n\ndata: [DONE]\n\n");
+  });
+
+  test("appends [DONE] when the upstream stream ends without one", async () => {
+    const out = await passthroughBytes(["data: hi\n\n"]);
+    expect(out).toBe("data: hi\n\ndata: [DONE]\n\n");
+  });
+
+  test("drops trailing data after [DONE]", async () => {
+    const out = await passthroughBytes(["data: a\n\ndata: [DONE]\n\ndata: junk\n\n"]);
+    expect(out).toBe("data: a\n\ndata: [DONE]\n\n");
+  });
+
+  test("a lone partial marker at EOF is replaced by the canonical terminator", async () => {
+    const out = await passthroughBytes(["data: hi\n\n["]);
+    expect(out).toBe("data: hi\n\ndata: [DONE]\n\n");
+  });
+
+  test("JSON payload events pass through untouched", async () => {
+    const out = await passthroughBytes([
+      "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+      "data: {\"choices\":[{\"delta\":{\"content\":\"y\"}}]}\n\n",
+      "data: [DONE]\n\n",
+    ]);
+    expect(out).toBe(
+      "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n" +
+      "data: {\"choices\":[{\"delta\":{\"content\":\"y\"}}]}\n\n" +
+      "data: [DONE]\n\n",
+    );
+  });
 });
