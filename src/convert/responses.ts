@@ -136,9 +136,8 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
   if (Array.isArray(req.tools)) {
     const tools = out.tools ?? [];
     for (const t of req.tools) {
-      const type = typeof t.type === "string" ? t.type : "function";
       const name = typeof t.name === "string" ? t.name : "";
-      if (type !== "function" && !name) continue;
+      if (t.type !== "function" || !name) continue;
       tools.push({
         type: "function",
         function: {

@@ -24,6 +24,7 @@
 - 表内精确匹配优先，其次前缀启发式（如 `gpt-` → responses、`claude-` → messages），未知名模型默认走 Chat Completions；
 - 可用 `ZEN_MODEL_ENDPOINTS=model=chat|responses|messages|gemini` 覆盖单个模型；
 - `ZEN_MODEL_MAP` 别名先解析成上游模型 id，再按上游 id 选协议；
+- 客户端请求 `/v1/models` 时，代理会缓存转发 Zen 当前模型目录；Zen 返回的仅是模型 ID，不带端点或 schema，因此不会替代上述协议映射；
 - `ZEN_FORCE_CHAT_COMPLETIONS=true` 时不看模型家族，全部转 Chat Completions。
 
 ## 转换矩阵
@@ -42,6 +43,7 @@
 - **Responses 响应**：chat.completion → `resp_*` response 对象（message / function_call 输出条目）；流式输出 `response.created` → `response.output_text.delta` → `response.completed` 事件序列；
 - **Messages**：`system` / `messages` / `tools` / `max_tokens`；`tool_use` ↔ `tool_calls`、`tool_result` ↔ `role=tool`；响应 `stop_reason` ↔ `finish_reason`；流式输出 Anthropic 事件序列；
 - **Gemini**：`contents` / `systemInstruction` / `generationConfig` / `tools.functionDeclarations`；`functionCall` ↔ `tool_calls`、`functionResponse` ↔ `role=tool`；
+- **Tools**：所有入站协议统一只保留标准 `function` 工具；Codex Responses 的 `web_search`、`computer`、`image_generation`、`mcp`、`custom` 等工具以及指向它们的 `tool_choice` 不会发给 Zen，避免 Console 对不支持类型返回 400；
 - 图片等非文本 content 目前会被忽略（纯文本转换）；若模型本身不支持多模态，上游
   返回的 `invalid_request_error`（如 `Model only supports text input`）会被代理
   **原样回传且不重试、不触发 key 回退**——见 [retry-and-fallback.md](retry-and-fallback.md)。

@@ -4,7 +4,7 @@ import { messagesToChatRequest, chatToMessagesRequest } from "./messages";
 import { parseChatCompletion, parseChatRequest } from "./chat";
 import { chatToGeminiRequest } from "./gemini";
 import { chatChunksToResponses, responsesToChatChunks, chatChunksToMessages, chatChunksToGemini, readSSE, type SseEvent } from "./stream";
-import type { ChatChunk } from "./types";
+import { sanitizeFunctionTools, type ChatChunk, type ChatRequest } from "./types";
 
 const chunk = (partial: Partial<ChatChunk>): ChatChunk => ({
   id: "c1",
@@ -137,6 +137,21 @@ describe("responses -> chat request", () => {
     expect(req.tools?.length).toBe(1);
   });
 
+  test("drops named non-function Responses tools instead of recoding them as functions", () => {
+    const req = responsesToChatRequest({
+      model: "muse-spark-1.2-contributor-free",
+      input: "hi",
+      tools: [
+        { type: "function", name: "read_file", parameters: { type: "object" } },
+        { type: "web_search", name: "search", search_context_size: "medium" },
+        { type: "custom", name: "apply_patch", format: { type: "grammar" } },
+      ],
+    });
+    expect(req.tools).toEqual([
+      { type: "function", function: { name: "read_file", parameters: { type: "object" } } },
+    ]);
+  });
+
   test("developer role maps to system", () => {
     const req = responsesToChatRequest({
       model: "m",
@@ -214,6 +229,28 @@ describe("chat -> responses request", () => {
       content: [{ type: "reasoning_text", text: "inspect the repository" }],
     });
     expect(output[1]).toMatchObject({ type: "message", role: "assistant" });
+  });
+});
+
+describe("Zen tool compatibility", () => {
+  test("retains only standard functions and removes an incompatible tool choice", () => {
+    const req = {
+      model: "muse-spark-1.2-contributor-free",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        { type: "function", function: { name: "read_file", parameters: { type: "object" } } },
+        { type: "computer", name: "computer" },
+        { type: "custom", function: { name: "patch" } },
+      ],
+      tool_choice: { type: "computer" },
+    } as unknown as ChatRequest;
+
+    const result = sanitizeFunctionTools(req);
+    expect(req.tools).toEqual([
+      { type: "function", function: { name: "read_file", parameters: { type: "object" } } },
+    ]);
+    expect(req.tool_choice).toBeUndefined();
+    expect(result).toEqual({ discardedTypes: ["computer", "custom"], discardedToolChoice: true });
   });
 });
 

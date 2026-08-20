@@ -34,6 +34,18 @@ zenproxy 针对 opencode zen 网关（`https://opencode.ai/zen/v1`）及其背�
 **判定关键字**：`reasoning_content` + `must be passed back`，且错误为
 `invalid_request_error`。
 
+### 1c. Responses 非函数工具不被 Console 支持（400 invalid_request_error）
+
+**触发**：Codex 等 Responses 客户端可能携带 `web_search`、`computer`、`image_generation`、
+`mcp`、`custom` 等内置工具。Zen 的 Console 上游只接受可转换的标准 `function` 工具，典型错误为
+``tools[5] did not match any supported type``。
+
+**适配**：代理在所有入站协议完成 canonical Chat 转换后，只保留合法的
+`type:"function"` + `function.name` 工具；被移除工具对应的 `tool_choice` 也删除。这个规则对
+Responses、Chat、Messages 和 Gemini 出站统一生效，保证未知内置工具不会被原样透传到任意模型。
+被移除的工具不能在 Zen 端执行。若上游仍返回该错误，代理将其作为确定性请求错误直接回传，
+不重试、不切换 API key。
+
 ## 2. 客户端状态丢失：代理层修复消息序列
 
 ### 2a. assistant tool_calls 后面缺 role=tool 响应（OpenAI 兼容校验）

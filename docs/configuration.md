@@ -22,6 +22,8 @@
 | `ZEN_STATUS_TOKEN` | 空 | 上报到 Status UI 时携带的 bearer token（与 `STATUS_EVENT_TOKEN` 一致） |
 | `ZEN_FORCE_CHAT_COMPLETIONS` | `false` | 所有请求统一转成 Chat Completions 转发 |
 | `ZEN_FORCE_CHAT_INBOUND` | `false` | 只接受 `/v1/chat/completions` 入站，`/v1/responses` 与 `/v1/messages` 直接报错 |
+| `ZEN_MODEL_DISCOVERY` | `true` | `GET /v1/models` 时从上游 Zen `/models` 拉取当前模型目录；失败时使用内置目录 |
+| `ZEN_MODEL_DISCOVERY_REFRESH_SECONDS` | `300` | 上游模型目录的缓存时长（秒） |
 | `ZEN_MODELS` | 空 | 允许反代的模型，逗号分隔；留空 = 全部放行 |
 | `ZEN_MODEL_MAP` | 空 | 别名映射，如 `v4f=deepseek-v4-flash-free` |
 | `ZEN_MODEL_ENDPOINTS` | 空 | 模型→上游协议覆盖，如 `gpt-5.4=chat`（`chat`/`responses`/`messages`/`gemini`） |
@@ -56,3 +58,17 @@ curl http://localhost:8080/v1/models
 ```
 
 接入 opencode / 任意 OpenAI 兼容客户端时，把 baseURL 指向 `http://<host>:8080/v1` 即可。
+
+## 模型目录与出站协议
+
+默认情况下，代理在客户端请求 `GET /v1/models` 时会向 Zen 的 `/models` 拉取当前目录，并按
+`ZEN_MODEL_DISCOVERY_REFRESH_SECONDS` 缓存；网络失败或返回无效数据时自动回退到内置目录。
+设置了 `ZEN_MODELS` 时，白名单优先，代理不会向上游拉取目录。
+
+Zen 的 `/models` 响应只包含模型 ID、归属和创建时间，**不包含**每个模型应使用的 API 格式或工具能力。
+因此出站协议仍由内置官方映射与模型前缀决定；新模型的协议不符合前缀时，使用
+`ZEN_MODEL_ENDPOINTS=<model>=chat|responses|messages|gemini` 显式覆盖。
+
+所有出站协议只发送标准函数工具。Codex 的 `web_search`、`computer`、`image_generation`、`mcp`、
+`custom` 等非 `function` 工具会在代理中移除，且引用已移除工具的 `tool_choice` 也会移除，避免 Zen
+Console 返回 ``tools[n] did not match any supported type``。这些被移除的内置工具不会由 Zen 端执行。

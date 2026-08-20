@@ -11,7 +11,7 @@ import { Logger } from "../log";
 import { Circuit } from "./circuit";
 import { FallbackState } from "./fallback";
 import { Reporter } from "./reporter";
-import { UpstreamClient, CircuitOpenError, type UpstreamResponse } from "./upstream";
+import { UpstreamClient, CircuitOpenError, type UpstreamModel, type UpstreamResponse } from "./upstream";
 import { makeLookup } from "./dial";
 import { parseChatRequest, renderChatRequest, renderChatCompletion, parseChatCompletion, type ChatCompletion, type ChatRequest } from "../convert/chat";
 import { parseResponsesRequest, responsesToChatRequest, chatToResponsesRequest, parseResponsesResponse, renderChatCompletionAsResponses, normalizeToolCallSequence } from "../convert/responses";
@@ -27,7 +27,7 @@ import {
 
 /** Status visibility window: a model only shows up if routed within this span. */
 const STATUS_WINDOW_MS = 24 * 60 * 60 * 1000;
-import type { ChatChunk, ChatMessage } from "../convert/types";
+import { sanitizeFunctionTools, type ChatChunk, type ChatMessage } from "../convert/types";
 
 type InboundFormat = "chat" | "responses" | "messages";
 type OutboundProtocol = "chat" | "responses" | "messages" | "gemini";
@@ -196,7 +196,7 @@ export class Proxy {
       if (method === "POST" && path === "/v1/chat/completions") return await this.handleCompletion(req, "chat");
       if (method === "POST" && path === "/v1/responses") return await this.handleCompletion(req, "responses");
       if (method === "POST" && path === "/v1/messages") return await this.handleCompletion(req, "messages");
-      if (method === "GET" && path === "/v1/models") return this.requireAuth(req) ? this.handleModels() : unauthorized();
+      if (method === "GET" && path === "/v1/models") return this.requireAuth(req) ? await this.handleModels() : unauthorized();
       if (method === "GET" && path === "/debug/upstream-ip") {
         return this.requireDebugAuth(req) ? this.handleDebugUpstreamIP() : unauthorized();
       }
@@ -283,6 +283,14 @@ export class Proxy {
       // Upstream stays legal by filling empty tool responses for every
       // unanswered call_id; paired calls are untouched.
       normalizeToolCallSequence(chatReq.messages);
+      const toolSanitization = sanitizeFunctionTools(chatReq);
+      if (toolSanitization.discardedTypes.length > 0 || toolSanitization.discardedToolChoice) {
+        this.log.warn("discarded unsupported tool definitions for Zen upstream", {
+          model: upstreamModel,
+          discarded_tool_types: toolSanitization.discardedTypes,
+          discarded_tool_choice: toolSanitization.discardedToolChoice,
+        });
+      }
     } catch (err) {
       return errorResponse(400, `cannot convert request to chat completions: ${String(err)}`, "invalid_request_error");
     }
@@ -523,23 +531,32 @@ export class Proxy {
     return obj as Record<string, unknown>;
   }
 
-  private handleModels(): Response {
+  private async handleModels(): Promise<Response> {
     const seen = new Set<string>();
-    const ids: string[] = [];
-    const add = (id: string) => {
+    const models: UpstreamModel[] = [];
+    const add = (model: UpstreamModel) => {
+      const id = model.id;
       if (id && !seen.has(id)) {
         seen.add(id);
-        ids.push(id);
+        models.push(model);
       }
     };
-    const list = this.cfg.models.length > 0 ? this.cfg.models : catalogModelIds();
-    for (const m of list) add(m);
-    for (const alias of Object.keys(this.cfg.modelMap)) add(alias);
+    const discovered = this.cfg.models.length === 0 ? await this.upstream.listModels() : [];
+    const list = this.cfg.models.length > 0
+      ? this.cfg.models.map((id) => ({ id }))
+      : discovered.length > 0 ? discovered : catalogModelIds().map((id) => ({ id }));
+    for (const model of list) add(model);
+    for (const alias of Object.keys(this.cfg.modelMap)) add({ id: alias, ownedBy: "oc-fwd" });
     const created = Math.floor(Date.now() / 1000);
     return json(
       {
         object: "list",
-        data: ids.map((id) => ({ id, object: "model", created, owned_by: "oc-fwd" })),
+        data: models.map((model) => ({
+          id: model.id,
+          object: "model",
+          created: model.created ?? created,
+          owned_by: model.ownedBy ?? "oc-fwd",
+        })),
       },
       { "X-Zen-Proxy": "1" },
     );

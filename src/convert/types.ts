@@ -37,6 +37,59 @@ export interface ChatRequest {
   [key: string]: unknown;
 }
 
+export interface ToolSanitization {
+  discardedTypes: string[];
+  discardedToolChoice: boolean;
+}
+
+/** Keep the function-tool subset shared by Chat, Responses, Messages, and Gemini. */
+export function sanitizeFunctionTools(req: ChatRequest): ToolSanitization {
+  const rawTools: unknown[] = Array.isArray(req.tools) ? req.tools : [];
+  const tools: ChatTool[] = [];
+  const discardedTypes: string[] = [];
+
+  for (const rawTool of rawTools) {
+    const tool = rawTool !== null && typeof rawTool === "object" ? rawTool as Record<string, unknown> : {};
+    const type = typeof tool.type === "string" ? tool.type : "unknown";
+    const fn = tool.function !== null && typeof tool.function === "object" ? tool.function as Record<string, unknown> : {};
+    const name = typeof fn.name === "string" ? fn.name : "";
+    if (type !== "function" || !name) {
+      discardedTypes.push(type);
+      continue;
+    }
+    tools.push({
+      type: "function",
+      function: {
+        name,
+        ...(typeof fn.description === "string" ? { description: fn.description } : {}),
+        ...(fn.parameters !== undefined ? { parameters: fn.parameters } : {}),
+      },
+    });
+  }
+
+  if (tools.length > 0) req.tools = tools;
+  else delete req.tools;
+
+  const discardedToolChoice = req.tool_choice !== undefined && !isSupportedToolChoice(req.tool_choice, new Set(tools.map((tool) => tool.function.name)));
+  if (discardedToolChoice) delete req.tool_choice;
+  return { discardedTypes, discardedToolChoice };
+}
+
+function isSupportedToolChoice(choice: unknown, names: Set<string>): boolean {
+  if (names.size === 0) return false;
+  if (choice === "auto" || choice === "none" || choice === "required") return true;
+  if (choice === null || typeof choice !== "object") return false;
+  const value = choice as Record<string, unknown>;
+  if (value.type !== "function") return false;
+  const functionValue = value.function !== null && typeof value.function === "object"
+    ? value.function as Record<string, unknown>
+    : {};
+  const name = typeof value.name === "string"
+    ? value.name
+    : typeof functionValue.name === "string" ? functionValue.name : "";
+  return names.has(name);
+}
+
 export interface ChatUsage {
   prompt_tokens: number;
   completion_tokens: number;

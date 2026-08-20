@@ -19,6 +19,12 @@ export interface UpstreamResponse {
   destroy?: () => void;
 }
 
+export interface UpstreamModel {
+  id: string;
+  created?: number;
+  ownedBy?: string;
+}
+
 export class CircuitOpenError extends Error {
   constructor() {
     super("upstream rate limit circuit is open");
@@ -35,6 +41,9 @@ interface RawResponse {
 export class UpstreamClient {
   private keys: string[];
   private probeTimer: ReturnType<typeof setInterval> | null = null;
+  private modelCatalog: UpstreamModel[] = [];
+  private modelCatalogExpiresAt = 0;
+  private modelCatalogInFlight: Promise<UpstreamModel[]> | null = null;
 
   constructor(
     private cfg: Config,
@@ -67,6 +76,17 @@ export class UpstreamClient {
 
   clock(): number {
     return this.fallback.clock();
+  }
+
+  /** Fetch Zen's OpenAI-compatible model list, retaining the last good value. */
+  async listModels(): Promise<UpstreamModel[]> {
+    if (!this.cfg.modelDiscovery) return [];
+    if (Date.now() < this.modelCatalogExpiresAt) return this.modelCatalog;
+    if (this.modelCatalogInFlight) return this.modelCatalogInFlight;
+    this.modelCatalogInFlight = this.refreshModels().finally(() => {
+      this.modelCatalogInFlight = null;
+    });
+    return this.modelCatalogInFlight;
   }
 
   requestKey(model: string): { key: string; hasKey: boolean } {
@@ -257,6 +277,49 @@ export class UpstreamClient {
     }));
   }
 
+  private async refreshModels(): Promise<UpstreamModel[]> {
+    const key = this.cfg.upstreamAPIKey || this.keys[0] || "";
+    const url = this.cfg.upstreamBase + "/models";
+    const u = new URL(url);
+    const isHttps = u.protocol === "https:";
+    const port = u.port ? Number(u.port) : isHttps ? 443 : 80;
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "User-Agent": "oc-fwd/2.0 (bun)",
+      Connection: "close",
+    };
+    if (key) headers.Authorization = `Bearer ${key}`;
+
+    try {
+      const tcp = await openUpstreamSocket(this.cfg, { host: u.hostname, port, timeoutMs: this.cfg.dialTimeoutMs });
+      const resp = await http1Request({
+        tcp,
+        tls: isHttps,
+        servername: u.hostname,
+        request: buildRequest("GET", u.pathname + u.search, u.host, headers),
+        totalTimeoutMs: this.cfg.dialTimeoutMs,
+      });
+      const body = await readNodeText(resp.body);
+      resp.destroy();
+      if (resp.status < 200 || resp.status >= 300) {
+        this.log.debug("upstream model discovery failed", { status: resp.status, body: body.slice(0, 512) });
+        return this.modelCatalog;
+      }
+      const parsed = parseModelList(body);
+      if (parsed.length === 0) {
+        this.log.debug("upstream model discovery returned no model ids");
+        return this.modelCatalog;
+      }
+      this.modelCatalog = parsed;
+      this.modelCatalogExpiresAt = Date.now() + this.cfg.modelDiscoveryRefreshMs;
+      this.log.debug("upstream model catalog refreshed", { models: parsed.length });
+      return parsed;
+    } catch (err) {
+      this.log.debug("upstream model discovery failed", { error: String(err) });
+      return this.modelCatalog;
+    }
+  }
+
   /** Tiny anonymous probe used by the recovery loop. */
   async probeAnonymous(model: string, timeoutMs: number): Promise<boolean> {
     const probeModel = model || this.cfg.models[0] || "deepseek-v4-flash-free";
@@ -311,6 +374,41 @@ function modelFromBody(body: string): string {
   } catch {
     return "";
   }
+}
+
+function parseModelList(body: string): UpstreamModel[] {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    return [];
+  }
+  const data = raw !== null && typeof raw === "object" ? (raw as { data?: unknown }).data : undefined;
+  if (!Array.isArray(data)) return [];
+  const seen = new Set<string>();
+  const models: UpstreamModel[] = [];
+  for (const value of data) {
+    if (value === null || typeof value !== "object") continue;
+    const item = value as Record<string, unknown>;
+    const id = typeof item.id === "string" ? item.id : "";
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    models.push({
+      id,
+      ...(typeof item.created === "number" ? { created: item.created } : {}),
+      ...(typeof item.owned_by === "string" ? { ownedBy: item.owned_by } : {}),
+    });
+  }
+  return models;
+}
+
+async function readNodeText(stream: Readable): Promise<string> {
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of stream) {
+    if (typeof chunk === "string") chunks.push(Buffer.from(chunk));
+    else chunks.push(chunk as Uint8Array);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 /**
@@ -381,7 +479,10 @@ export async function summarizeUpstreamError(resp: UpstreamResponse): Promise<Up
   // deterministically. Retrying and switching to key mode cannot fix the
   // missing field, so the error is passed straight back to the client and
   // key mode is never entered on its account.
-  const directPassThrough = isInvalidRequest && hay.includes("reasoning_content") && hay.includes("must be passed back");
+  const directPassThrough = isInvalidRequest && (
+    (hay.includes("reasoning_content") && hay.includes("must be passed back")) ||
+    (hay.includes("tools[") && hay.includes("did not match any supported type"))
+  );
   const truncated = text.length > 2048 ? text.slice(0, 2048) + "…" : text;
   resp.body = new Blob([truncated]).stream();
   return { passThrough, directPassThrough, type: errorType, code: errorCode, message: errorMessage, body: truncated };

@@ -41,6 +41,7 @@ export const ZEN_CATALOG: Record<string, OutboundProtocol> = {
   "grok-4.5": "responses",
   "grok-build-0.1": "responses",
   "muse-spark-1.2": "responses",
+  "muse-spark-1.2-contributor-free": "responses",
 
   // Anthropic Messages API (@ai-sdk/anthropic)
   "claude-fable-5": "messages",
@@ -52,6 +53,7 @@ export const ZEN_CATALOG: Record<string, OutboundProtocol> = {
   "claude-sonnet-5": "messages",
   "claude-sonnet-4-6": "messages",
   "claude-sonnet-4-5": "messages",
+  "claude-sonnet-4": "messages",
   "claude-haiku-4-5": "messages",
   "qwen3.7-max": "messages",
   "qwen3.7-plus": "messages",
@@ -76,6 +78,7 @@ export const ZEN_CATALOG: Record<string, OutboundProtocol> = {
   "mimo-v2.5-free": "chat",
   "hy3-free": "chat",
   "laguna-s-2.1-free": "chat",
+  "x-preview-f-free": "chat",
   "nemotron-3-ultra-free": "chat",
   "nemotron-3.5-lightning-free": "chat",
 

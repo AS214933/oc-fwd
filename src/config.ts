@@ -29,6 +29,8 @@ export interface Config {
   statusToken: string;
   forceChatCompletions: boolean;
   forceChatInbound: boolean;
+  modelDiscovery: boolean;
+  modelDiscoveryRefreshMs: number;
   models: string[];
   modelMap: Record<string, string>;
   modelEndpoints: ModelEndpointOverride;
@@ -147,6 +149,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
   const noKeyConfirm = envInt("ZEN_NO_KEY_RECOVERY_CONFIRMATIONS", 3, env);
   const upstreamTimeout = envFloat("ZEN_UPSTREAM_TIMEOUT_SECONDS", 600, env);
   const responsesKeepalive = envFloat("ZEN_RESPONSES_KEEPALIVE_SECONDS", 15, env);
+  const modelDiscoveryRefresh = envFloat("ZEN_MODEL_DISCOVERY_REFRESH_SECONDS", 300, env);
 
   if (!listen) throw new Error("LISTEN_ADDR cannot be empty");
   if (dialTimeout <= 0) throw new Error(`invalid ZEN_DIAL_TIMEOUT_SECONDS ${dialTimeout}: must be > 0`);
@@ -156,6 +159,9 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
   }
   if (responsesKeepalive < 0) {
     throw new Error(`invalid ZEN_RESPONSES_KEEPALIVE_SECONDS ${responsesKeepalive}: must be >= 0`);
+  }
+  if (modelDiscoveryRefresh <= 0) {
+    throw new Error(`invalid ZEN_MODEL_DISCOVERY_REFRESH_SECONDS ${modelDiscoveryRefresh}: must be > 0`);
   }
 
   const cfg: Config = {
@@ -178,6 +184,8 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     statusToken: envStr("ZEN_STATUS_TOKEN", "", env),
     forceChatCompletions: envBool("ZEN_FORCE_CHAT_COMPLETIONS", false, env),
     forceChatInbound: envBool("ZEN_FORCE_CHAT_INBOUND", false, env),
+    modelDiscovery: envBool("ZEN_MODEL_DISCOVERY", true, env),
+    modelDiscoveryRefreshMs: modelDiscoveryRefresh * 1000,
     models: [],
     modelMap: parseModelMap(envStr("ZEN_MODEL_MAP", "", env)) as Record<string, string>,
     modelEndpoints: parseModelEndpoints(envStr("ZEN_MODEL_ENDPOINTS", "", env)) as ModelEndpointOverride,

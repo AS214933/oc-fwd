@@ -33,6 +33,8 @@ async function testConfig(overrides: Partial<Config> = {}): Promise<Config> {
     ZEN_UPSTREAM_TIMEOUT_SECONDS: "10",
     ZEN_FORCE_CHAT_COMPLETIONS: "false",
     ZEN_FORCE_CHAT_INBOUND: "false",
+    ZEN_MODEL_DISCOVERY: "true",
+    ZEN_MODEL_DISCOVERY_REFRESH_SECONDS: "300",
     ZEN_API_KEYS_FILE: "",
     ZEN_AUTH_KEY: "",
     ZEN_STATUS_URL: "",
@@ -138,6 +140,32 @@ describe("passthrough", () => {
     expect(body.output[0]?.type).toBe("message");
     expect(body.output[0]?.content[0]?.text).toBe("echo:gpt-5.6-terra");
     expect(mock.last()?.path).toBe("/responses");
+  });
+
+  test("Codex mixed tool list -> Muse Responses keeps only functions", async () => {
+    mock.clear();
+    const res = await post({
+      model: "muse-spark-1.2-contributor-free",
+      input: "hi",
+      tools: [
+        { type: "function", name: "read_file", description: "Read a file", parameters: { type: "object" } },
+        { type: "web_search", name: "search", search_context_size: "medium" },
+        { type: "computer", name: "computer" },
+        { type: "custom", name: "apply_patch", format: { type: "grammar", syntax: "diff" } },
+        { type: "mcp", server_label: "github" },
+        { type: "image_generation" },
+      ],
+      tool_choice: { type: "custom", name: "apply_patch" },
+    }, "/v1/responses");
+    expect(res.status).toBe(200);
+    const sent = mock.last();
+    expect(sent?.path).toBe("/responses");
+    const request = sent?.body as {
+      tools?: Array<{ type: string; name: string; description?: string; parameters?: unknown }>;
+      tool_choice?: unknown;
+    };
+    expect(request.tools).toEqual([{ type: "function", name: "read_file", description: "Read a file", parameters: { type: "object" } }]);
+    expect(request.tool_choice).toBeUndefined();
   });
 
   test("messages -> messages passthrough (claude)", async () => {
@@ -1007,6 +1035,37 @@ describe("retry + fallback", () => {
     expect(ds?.state).toBe("anonymous");
   });
 
+  test("unsupported tool type error passes through without retry or key fallback", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/responses") {
+        return jsonResponse({
+          error: {
+            message: "Upstream request failed: [invalid_request_error] `tools[5]` did not match any supported type",
+            type: "invalid_request_error",
+            param: "tools[5]",
+          },
+        }, 400);
+      }
+      return jsonResponse({});
+    });
+    const cfg = await testConfig({ apiKeys: ["key-muse"], retryMax: 3 });
+    const { url: u } = await startProxy(cfg);
+    const res = await fetch(`${u}/v1/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.2-contributor-free",
+        input: "hi",
+        tools: [{ type: "function", name: "read_file", parameters: { type: "object" } }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const calls = mock.requests.filter((request) => request.path === "/responses");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.headers.get("Authorization")).toBeNull();
+  });
+
   test("concurrent 429s don't truncate in-flight retries when the circuit opens", async () => {
     let calls = 0;
     let release!: () => void;
@@ -1153,7 +1212,37 @@ describe("auth, models, aliases, force modes", () => {
     expect(body.error.code).toBe("model_not_found");
   });
 
+  test("/v1/models discovers and caches the current upstream catalog", async () => {
+    mock.clear();
+    let discoveryRequests = 0;
+    mock.setHandler(async (ctx) => {
+      if (ctx.path === "/models") {
+        discoveryRequests++;
+        return jsonResponse({
+          object: "list",
+          data: [
+            { id: "muse-spark-1.2-contributor-free", object: "model", created: 123, owned_by: "opencode" },
+            { id: "new-zen-model", object: "model", created: 456, owned_by: "opencode" },
+          ],
+        });
+      }
+      return jsonResponse({});
+    });
+    const { url: discoveryURL } = await startProxy(await testConfig({ modelDiscoveryRefreshMs: 60_000 }));
+    const first = await fetch(`${discoveryURL}/v1/models`);
+    const firstModels = (await first.json()) as { data: Array<{ id: string; object: string; created: number; owned_by: string }> };
+    expect(firstModels.data).toEqual([
+      { id: "muse-spark-1.2-contributor-free", object: "model", created: 123, owned_by: "opencode" },
+      { id: "new-zen-model", object: "model", created: 456, owned_by: "opencode" },
+    ]);
+    const second = await fetch(`${discoveryURL}/v1/models`);
+    expect(second.status).toBe(200);
+    expect(discoveryRequests).toBe(1);
+  });
+
   test("/v1/models lists the catalog or whitelist", async () => {
+    mock.clear();
+    mock.setHandler(async () => jsonResponse({}));
     const { url: u } = await startProxy(await testConfig());
     const res = await fetch(`${u}/v1/models`);
     expect(res.status).toBe(200);
