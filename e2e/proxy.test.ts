@@ -132,6 +132,28 @@ describe("passthrough", () => {
     expect(sent.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
   });
 
+  test("chat multimodal image parts reach the upstream (mimo)", async () => {
+    mock.clear();
+    const res = await post({
+      model: "mimo-v2.5-free",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "describe this image" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,Zm9vYmFy" } },
+          ],
+        },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const sent = mock.last()?.body as { messages: Array<{ content: unknown }> };
+    expect(sent.messages[0]?.content).toEqual([
+      { type: "text", text: "describe this image" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,Zm9vYmFy" } },
+    ]);
+  });
+
   test("responses -> responses passthrough (gpt)", async () => {
     mock.clear();
     const res = await post({ model: "gpt-5.6-terra", input: "ping", stream: false }, "/v1/responses");

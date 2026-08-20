@@ -3,13 +3,14 @@
  */
 
 import type { ChatCompletion, ChatMessage, ChatRequest } from "./types";
-import { chatRole, contentToString } from "./types";
+import { chatRole, contentToString, structuredParts } from "./types";
 
 interface AnthropicBlock {
   type?: string;
   text?: string;
   thinking?: string;
   signature?: string;
+  source?: { type?: string; media_type?: string; data?: string; url?: string };
   id?: string;
   name?: string;
   input?: unknown;
@@ -60,6 +61,9 @@ export function messagesToChatRequest(req: MessagesRequest): ChatRequest {
       .filter((b) => b.type === "text" && typeof b.text === "string")
       .map((b) => b.text as string)
       .join("");
+    const structured = blocks.filter(
+      (b) => b.type !== "thinking" && b.type !== "tool_use" && b.type !== "tool_result",
+    );
     const thinking = blocks.filter(
       (b) => b.type === "thinking" && typeof b.thinking === "string" && b.thinking !== "",
     );
@@ -76,6 +80,8 @@ export function messagesToChatRequest(req: MessagesRequest): ChatRequest {
       continue;
     }
     const msg: ChatMessage = { role, content: text };
+    const parts = structuredParts(structured);
+    if (parts) msg.parts = parts;
     if (thinking.length > 0) {
       msg.reasoning_content = thinking.map((b) => b.thinking as string).join("");
       const signature = thinking[thinking.length - 1]?.signature;
@@ -88,7 +94,7 @@ export function messagesToChatRequest(req: MessagesRequest): ChatRequest {
         function: { name: tu.name ?? "", arguments: JSON.stringify(tu.input ?? {}) },
       }));
     }
-    if (text !== "" || msg.tool_calls || msg.reasoning_content) out.messages.push(msg);
+    if (text !== "" || msg.parts || msg.tool_calls || msg.reasoning_content) out.messages.push(msg);
   }
   if (out.messages.length === 0) throw new Error("messages body produced no messages");
   if (Array.isArray(req.tools)) {
@@ -130,7 +136,11 @@ export function chatToMessagesRequest(req: ChatRequest): Record<string, unknown>
         ...(msg.reasoning_signature ? { signature: msg.reasoning_signature } : {}),
       });
     }
-    if (msg.content) content.push({ type: "text", text: msg.content });
+    if (Array.isArray(msg.parts) && msg.parts.length > 0) {
+      for (const block of anthropicBlocksFromParts(msg.parts)) content.push(block);
+    } else if (msg.content) {
+      content.push({ type: "text", text: msg.content });
+    }
     for (const tc of msg.tool_calls ?? []) {
       let input: unknown = {};
       try {
@@ -155,6 +165,45 @@ export function chatToMessagesRequest(req: ChatRequest): Record<string, unknown>
       ...(t.function.description ? { description: t.function.description } : {}),
       ...(t.function.parameters !== undefined ? { input_schema: t.function.parameters } : {}),
     }));
+  }
+  return out;
+}
+
+/** Render canonical content parts as Anthropic content blocks. */
+function anthropicBlocksFromParts(parts: unknown[]): AnthropicBlock[] {
+  const out: AnthropicBlock[] = [];
+  for (const part of parts) {
+    if (part === null || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    const type = typeof p.type === "string" ? p.type : "";
+    switch (type) {
+      case "text":
+        if (typeof p.text === "string") out.push({ type: "text", text: p.text });
+        break;
+      case "image":
+      case "document":
+        out.push(part as AnthropicBlock);
+        break;
+      case "image_url":
+      case "input_image": {
+        const url = type === "image_url"
+          ? (p.image_url as Record<string, unknown>)?.url
+          : p.image_url;
+        if (typeof url === "string" && url.startsWith("data:")) {
+          const comma = url.indexOf(",");
+          const meta = comma > 0 ? url.slice(5, comma) : "";
+          const mediaType = meta.split(";")[0] || "image/png";
+          const data = comma > 0 ? url.slice(comma + 1) : "";
+          if (data) out.push({ type: "image", source: { type: "base64", media_type: mediaType, data } });
+        } else if (typeof url === "string" && url !== "") {
+          out.push({ type: "image", source: { type: "url", url } });
+        }
+        break;
+      }
+      default:
+        if (typeof p.text === "string") out.push({ type: "text", text: p.text });
+        break;
+    }
   }
   return out;
 }

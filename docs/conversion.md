@@ -45,8 +45,11 @@
 - **Gemini**：`contents` / `systemInstruction` / `generationConfig` / `tools.functionDeclarations`；`functionCall` ↔ `tool_calls`、`functionResponse` ↔ `role=tool`；
 - **思考内容**：canonical 的 `reasoning_content` ↔ Responses `reasoning` 条目（含流式 `reasoning_text.delta`）、Anthropic `thinking` 块（含流式 `thinking_delta`，并保留 `signature` 供 claude→claude 原样回传）、Gemini `thought: true` 部分、DeepSeek chat `reasoning_content`。非流式与流式都覆盖，详见 [special-adaptations.md](special-adaptations.md)；
 - **Tools**：所有入站协议统一只保留标准 `function` 工具；Codex Responses 的 `web_search`、`computer`、`image_generation`、`mcp`、`custom` 等工具以及指向它们的 `tool_choice` 不会发给 Zen，避免 Console 对不支持类型返回 400；
-- 图片等非文本 content 目前会被忽略（纯文本转换）；若模型本身不支持多模态，上游
-  返回的 `invalid_request_error`（如 `Model only supports text input`）会被代理
+- **多模态内容**：canonical 消息保留结构化 `parts`（OpenAI `image_url`、Responses
+  `input_image` / `input_text` / `input_file`、Anthropic `image` 块），出站时还原为各
+  协议原生格式（chat `image_url`、Responses `input_image`、Anthropic `image`、
+  Gemini `inlineData`），纯文本消息仍保持原有扁平字符串形状；若模型本身不支持多模态，
+  上游返回的 `invalid_request_error`（如 `Model only supports text input`）会被代理
   **原样回传且不重试、不触发 key 回退**——见 [retry-and-fallback.md](retry-and-fallback.md)。
 
 ## 兼容模式开关

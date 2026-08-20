@@ -11,6 +11,8 @@ interface GeminiPart {
   thought?: boolean;
   functionCall?: { name?: string; args?: unknown };
   functionResponse?: { name?: string; response?: unknown };
+  inlineData?: { mimeType?: string; data?: string };
+  fileData?: { mimeType?: string; fileUri?: string };
 }
 
 interface GeminiResponseShape {
@@ -58,7 +60,11 @@ export function chatToGeminiRequest(req: ChatRequest): Record<string, unknown> {
     }
     const parts: GeminiPart[] = [];
     if (msg.reasoning_content) parts.push({ text: msg.reasoning_content, thought: true });
-    if (msg.content) parts.push({ text: msg.content });
+    if (Array.isArray(msg.parts) && msg.parts.length > 0) {
+      parts.push(...geminiPartsFromParts(msg.parts));
+    } else if (msg.content) {
+      parts.push({ text: msg.content });
+    }
     for (const tc of msg.tool_calls ?? []) {
       callNames.set(tc.id, tc.function.name);
       let args: unknown = {};
@@ -96,6 +102,50 @@ export function chatToGeminiRequest(req: ChatRequest): Record<string, unknown> {
         })),
       },
     ];
+  }
+  return out;
+}
+
+/** Render canonical content parts as Gemini parts (inlineData/fileData). */
+function geminiPartsFromParts(parts: unknown[]): GeminiPart[] {
+  const out: GeminiPart[] = [];
+  for (const part of parts) {
+    if (part === null || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    const type = typeof p.type === "string" ? p.type : "";
+    switch (type) {
+      case "text":
+        if (typeof p.text === "string") out.push({ text: p.text });
+        break;
+      case "image_url":
+      case "input_image": {
+        const url = type === "image_url"
+          ? (p.image_url as Record<string, unknown>)?.url
+          : p.image_url;
+        if (typeof url === "string" && url.startsWith("data:")) {
+          const comma = url.indexOf(",");
+          const meta = comma > 0 ? url.slice(5, comma) : "";
+          const mimeType = meta.split(";")[0] || "image/png";
+          const data = comma > 0 ? url.slice(comma + 1) : "";
+          if (data) out.push({ inlineData: { mimeType, data } });
+        } else if (typeof url === "string" && url !== "") {
+          out.push({ fileData: { mimeType: "image/png", fileUri: url } });
+        }
+        break;
+      }
+      case "image": {
+        const src = (p.source ?? {}) as Record<string, unknown>;
+        if (typeof src.data === "string") {
+          out.push({ inlineData: { mimeType: typeof src.media_type === "string" ? src.media_type : "image/png", data: src.data } });
+        } else if (typeof src.url === "string") {
+          out.push({ fileData: { mimeType: "image/png", fileUri: src.url } });
+        }
+        break;
+      }
+      default:
+        if (typeof p.text === "string") out.push({ text: p.text });
+        break;
+    }
   }
   return out;
 }

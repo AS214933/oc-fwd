@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { responsesToChatRequest, chatToResponsesRequest, renderChatCompletionAsResponses } from "./responses";
 import { messagesToChatRequest, chatToMessagesRequest, parseMessagesResponse, renderChatCompletionAsMessages } from "./messages";
-import { parseChatCompletion, parseChatRequest } from "./chat";
+import { parseChatCompletion, parseChatRequest, renderChatRequest } from "./chat";
 import { chatToGeminiRequest, parseGeminiResponse } from "./gemini";
+import { parseResponsesRequest } from "./responses";
+import { parseMessagesRequest } from "./messages";
 import {
   chatChunksToResponses, responsesToChatChunks, chatChunksToMessages, chatChunksToGemini,
   messagesToChatChunks, geminiToChatChunks, renderMessagesEventsFromCompletion,
@@ -682,5 +684,151 @@ describe("SSE parsing", () => {
     expect(events[0]?.event).toBe("x");
     expect(events[0]?.data).toBe('{"a":1}\nmore');
     expect(events[1]?.data).toBe("[DONE]");
+  });
+});
+
+describe("multimodal content parts", () => {
+  test("chat request keeps image parts through parse and render", () => {
+    const req = parseChatRequest({
+      model: "mimo-v2.5-free",
+      stream: false,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what is in this image?" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,AAAA", detail: "high" } },
+          ],
+        },
+      ],
+    } as never);
+    expect(req.messages[0]?.content).toBe("what is in this image?");
+    expect(req.messages[0]?.parts).toEqual([
+      { type: "text", text: "what is in this image?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AAAA", detail: "high" } },
+    ]);
+    const out = JSON.parse(renderChatRequest(req)) as { messages: Array<Record<string, unknown>> };
+    expect(out.messages[0]?.content).toEqual([
+      { type: "text", text: "what is in this image?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,AAAA", detail: "high" } },
+    ]);
+    expect(out.messages[0]?.parts).toBeUndefined();
+  });
+
+  test("plain text content arrays are not promoted to parts", () => {
+    const req = parseChatRequest({
+      model: "mimo-v2.5-free",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    } as never);
+    expect(req.messages[0]).toEqual({ role: "user", content: "hi" });
+  });
+
+  test("responses input_image survives conversion to chat parts", () => {
+    const req = responsesToChatRequest(parseResponsesRequest({
+      model: "gpt-5.5",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "look" },
+            { type: "input_image", image_url: "data:image/jpeg;base64,BBBB" },
+          ],
+        },
+      ],
+    } as never));
+    expect(req.messages[0]?.content).toBe("look");
+    expect(req.messages[0]?.parts).toEqual([
+      { type: "input_text", text: "look" },
+      { type: "input_image", image_url: "data:image/jpeg;base64,BBBB" },
+    ]);
+  });
+
+  test("chat image parts render as Responses input_image", () => {
+    const req = parseChatRequest({
+      model: "gpt-5.5",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "see" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,CCCC", detail: "low" } },
+          ],
+        },
+      ],
+    } as never);
+    const out = chatToResponsesRequest(req) as Record<string, unknown>;
+    const input = out.input as Array<Record<string, unknown>>;
+    expect(input[0]?.content).toEqual([
+      { type: "input_text", text: "see" },
+      { type: "input_image", image_url: "data:image/png;base64,CCCC", detail: "low" },
+    ]);
+  });
+
+  test("anthropic image blocks survive conversion to chat image_url", () => {
+    const req = messagesToChatRequest(parseMessagesRequest({
+      model: "mimo-v2.5-free",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what color?" },
+            { type: "image", source: { type: "base64", media_type: "image/png", data: "DDDD" } },
+          ],
+        },
+      ],
+    } as never));
+    expect(req.messages[0]?.content).toBe("what color?");
+    expect(req.messages[0]?.parts).toEqual([
+      { type: "text", text: "what color?" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "DDDD" } },
+    ]);
+    const out = JSON.parse(renderChatRequest(req)) as { messages: Array<Record<string, unknown>> };
+    expect(out.messages[0]?.content).toEqual([
+      { type: "text", text: "what color?" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,DDDD" } },
+    ]);
+  });
+
+  test("chat image parts render as Anthropic image blocks", () => {
+    const req = parseChatRequest({
+      model: "claude-sonnet-4",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "hi" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,EEEE" } },
+          ],
+        },
+      ],
+    } as never);
+    const out = chatToMessagesRequest(req) as Record<string, unknown>;
+    const messages = out.messages as Array<{ content: unknown[] }>;
+    expect(messages[0]?.content).toEqual([
+      { type: "text", text: "hi" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "EEEE" } },
+    ]);
+  });
+
+  test("chat image parts render as Gemini inlineData", () => {
+    const req = parseChatRequest({
+      model: "gemini-3.5-flash",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "hi" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,FFFF" } },
+          ],
+        },
+      ],
+    } as never);
+    const out = chatToGeminiRequest(req) as Record<string, unknown>;
+    const contents = out.contents as Array<{ parts: unknown[] }>;
+    expect(contents[0]?.parts).toEqual([
+      { text: "hi" },
+      { inlineData: { mimeType: "image/png", data: "FFFF" } },
+    ]);
   });
 });

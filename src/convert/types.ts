@@ -13,6 +13,12 @@ export interface ChatToolCall {
 export interface ChatMessage {
   role: string;
   content: string;
+  /** Structured user-content parts preserved for multimodal round trips
+   *  (OpenAI image_url parts, Responses input_text/input_image, Anthropic
+   *  image/document blocks). Undefined for plain-text messages; when present,
+   *  outbound renderers emit these parts (or a protocol-native equivalent)
+   *  instead of the flattened content string. */
+  parts?: unknown[];
   /** Thinking-mode state relayed across protocols (DeepSeek reasoning_content,
    *  Responses reasoning_text, Anthropic thinking, Gemini thought parts). */
   reasoning_content?: string;
@@ -142,6 +148,68 @@ export function contentToString(content: unknown): string {
     else if (typeof p.content === "string") parts.push(p.content); // anthropic tool_result shorthand
   }
   return parts.join("");
+}
+
+/** Keep the structured parts of a content array only when it carries at
+ *  least one non-text part (image/document/file/...). Purely textual arrays
+ *  return undefined so the flattened content string stays the single
+ *  canonical representation. */
+export function structuredParts(content: unknown): unknown[] | undefined {
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  const parts = content.filter((p) => p !== null && typeof p === "object");
+  if (parts.length === 0) return undefined;
+  const hasNonText = parts.some((p) => {
+    const type = (p as Record<string, unknown>).type;
+    return type !== "text" && type !== "input_text" && type !== "output_text";
+  });
+  return hasNonText ? parts : undefined;
+}
+
+/** Normalize any protocol's content parts into OpenAI chat-completions-style
+ *  parts (text / image_url / input_file). Returns undefined when the message
+ *  has no structured parts (its flattened content string should be used). */
+export function chatContentParts(msg: ChatMessage): unknown[] | undefined {
+  const parts = Array.isArray(msg.parts) ? msg.parts : [];
+  if (parts.length === 0) return undefined;
+  const out: unknown[] = [];
+  for (const part of parts) {
+    if (part === null || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    const type = typeof p.type === "string" ? p.type : "";
+    switch (type) {
+      case "text":
+      case "image_url":
+      case "input_file":
+        out.push(part);
+        break;
+      case "input_text":
+        if (typeof p.text === "string") out.push({ type: "text", text: p.text });
+        break;
+      case "input_image": {
+        const url = typeof p.image_url === "string" ? p.image_url : "";
+        if (url) out.push({ type: "image_url", image_url: { url } });
+        break;
+      }
+      case "image": {
+        const src = (p.source ?? {}) as Record<string, unknown>;
+        if (typeof src.data === "string") {
+          const media = typeof src.media_type === "string" ? src.media_type : "image/png";
+          out.push({ type: "image_url", image_url: { url: `data:${media};base64,${src.data}` } });
+        } else if (typeof src.url === "string") {
+          out.push({ type: "image_url", image_url: { url: src.url } });
+        }
+        break;
+      }
+      // Anthropic document blocks have no OpenAI chat-completions part
+      // equivalent; they were always flattened away, so keep dropping them.
+      case "document":
+        break;
+      default:
+        if (typeof p.text === "string") out.push({ type: "text", text: p.text });
+        break;
+    }
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /** Map any client role into one the Chat Completions API accepts. */

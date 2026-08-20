@@ -5,7 +5,7 @@
  */
 
 import type { ChatCompletion, ChatChunk, ChatMessage, ChatRequest } from "./types";
-import { contentToString } from "./types";
+import { chatContentParts, contentToString, structuredParts } from "./types";
 
 export type { ChatCompletion, ChatChunk, ChatRequest };
 
@@ -18,9 +18,12 @@ export function parseChatRequest(body: unknown): ChatRequest {
   const messages = Array.isArray(raw.messages) ? raw.messages : [];
   const parsed: ChatMessage[] = messages.map((m) => {
     const msg = (m ?? {}) as Record<string, unknown>;
+    const rawContent = msg.content;
+    const parts = structuredParts(rawContent);
     return {
       role: typeof msg.role === "string" ? msg.role : "user",
-      content: contentToString(msg.content),
+      content: contentToString(rawContent),
+      ...(parts ? { parts } : {}),
       ...(typeof msg.reasoning_content === "string" ? { reasoning_content: msg.reasoning_content } : {}),
       ...(typeof msg.reasoning_signature === "string" ? { reasoning_signature: msg.reasoning_signature } : {}),
       ...(typeof msg.tool_call_id === "string" ? { tool_call_id: msg.tool_call_id } : {}),
@@ -75,8 +78,20 @@ export function parseChatRequestJSON(raw: string | Uint8Array): ChatRequest {
 
 /** Serialize an outbound chat completions request body. */
 export function renderChatRequest(req: ChatRequest): string {
-  const out: Record<string, unknown> = { ...req, model: req.model, messages: req.messages, stream: req.stream === true };
+  const out: Record<string, unknown> = {
+    ...req,
+    model: req.model,
+    messages: req.messages.map((msg) => renderChatMessage(msg)),
+    stream: req.stream === true,
+  };
   return JSON.stringify(out);
+}
+
+function renderChatMessage(msg: ChatMessage): Record<string, unknown> {
+  const { parts: _parts, ...rest } = msg;
+  const out = { ...rest } as Record<string, unknown>;
+  out.content = chatContentParts(msg) ?? msg.content;
+  return out;
 }
 
 /** Parse an upstream non-streaming chat.completion response. */

@@ -8,7 +8,7 @@
  */
 
 import type { ChatCompletion, ChatMessage, ChatRequest } from "./types";
-import { chatRole, contentToString } from "./types";
+import { chatRole, contentToString, structuredParts } from "./types";
 
 export interface ResponsesRequest {
   model: string;
@@ -114,9 +114,23 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
           pendingReasoning += rawReasoning;
           continue;
         }
+        case "input_text":
+        case "input_image":
+        case "input_file": {
+          const parts = structuredParts([item]);
+          out.messages.push({
+            role: "user",
+            content: typeof item.text === "string" ? item.text : "",
+            ...(parts ? { parts } : {}),
+          });
+          pendingReasoning = "";
+          continue;
+        }
       }
       const role = chatRole(item.role ?? "");
-      const text = contentToString(item.content) || item.text || "";
+      const rawContent = item.content;
+      const text = contentToString(rawContent) || item.text || "";
+      const parts = structuredParts(rawContent);
       if (role && (item.type === "message" || item.content !== undefined || text !== "")) {
         const reasoningContent = role === "assistant"
           ? pendingReasoning || item.reasoning_content || ""
@@ -124,6 +138,7 @@ export function responsesToChatRequest(req: ResponsesRequest): ChatRequest {
         out.messages.push({
           role: role || "user",
           content: text,
+          ...(parts ? { parts } : {}),
           ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
         });
       }
@@ -231,7 +246,7 @@ export function chatToResponsesRequest(req: ChatRequest): Record<string, unknown
       }
       continue;
     }
-    input.push({ type: "message", role: msg.role === "developer" ? "developer" : msg.role, content: msg.content });
+    input.push({ type: "message", role: msg.role === "developer" ? "developer" : msg.role, content: responsesContent(msg) });
   }
   const out: Record<string, unknown> = { model: req.model, input };
   if (instructions.length > 0) out.instructions = instructions.join("\n\n");
@@ -248,6 +263,48 @@ export function chatToResponsesRequest(req: ChatRequest): Record<string, unknown
   }
   if (req.tool_choice !== undefined) out.tool_choice = req.tool_choice;
   if (req.reasoning !== undefined) out.reasoning = req.reasoning;
+  return out;
+}
+
+/** Render a canonical message's content as Responses-API input parts. */
+function responsesContent(msg: ChatMessage): string | unknown[] {
+  const rawParts = Array.isArray(msg.parts) ? msg.parts : [];
+  if (rawParts.length === 0) return msg.content;
+  const out: unknown[] = [];
+  for (const part of rawParts) {
+    if (part === null || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    const type = typeof p.type === "string" ? p.type : "";
+    switch (type) {
+      case "input_text":
+      case "input_image":
+      case "input_file":
+        out.push(part);
+        break;
+      case "text":
+        if (typeof p.text === "string") out.push({ type: "input_text", text: p.text });
+        break;
+      case "image_url": {
+        const u = (p.image_url ?? {}) as Record<string, unknown>;
+        const url = typeof u.url === "string" ? u.url : "";
+        if (url) out.push({ type: "input_image", image_url: url, ...(typeof u.detail === "string" ? { detail: u.detail } : {}) });
+        break;
+      }
+      case "image": {
+        const src = (p.source ?? {}) as Record<string, unknown>;
+        if (typeof src.data === "string") {
+          const media = typeof src.media_type === "string" ? src.media_type : "image/png";
+          out.push({ type: "input_image", image_url: `data:${media};base64,${src.data}` });
+        } else if (typeof src.url === "string") {
+          out.push({ type: "input_image", image_url: src.url });
+        }
+        break;
+      }
+      default:
+        if (typeof p.text === "string") out.push({ type: "input_text", text: p.text });
+        break;
+    }
+  }
   return out;
 }
 
