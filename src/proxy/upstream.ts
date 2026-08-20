@@ -57,6 +57,18 @@ export class UpstreamClient {
     return this.fallback.state(model);
   }
 
+  lastSeenAt(model: string): number {
+    return this.fallback.lastSeenAt(model);
+  }
+
+  noteCall(model: string) {
+    this.fallback.noteCall(model);
+  }
+
+  clock(): number {
+    return this.fallback.clock();
+  }
+
   requestKey(model: string): { key: string; hasKey: boolean } {
     if (this.keys.length > 0) {
       if (this.fallback.inKeyMode(model)) {
@@ -72,6 +84,7 @@ export class UpstreamClient {
   /** Run the full retry/circuit/fallback loop for one upstream call. */
   async do(path: string, body: string, stream: boolean, signal?: AbortSignal): Promise<UpstreamResponse> {
     const model = modelFromBody(body);
+    this.fallback.noteCall(model);
     let attempt = 0;
     for (;;) {
       const { key, hasKey } = this.requestKey(model);

@@ -24,9 +24,10 @@ interface ModelFallback {
 
 export class FallbackState {
   private models = new Map<string, ModelFallback>();
-  /** Every model that has ever been routed through this proxy, so the status
-   *  UI can surface models beyond the configured ZEN_MODELS list. */
-  private seen = new Set<string>();
+  /** Model -> timestamp of its most recent route through this proxy, so the
+   *  status UI can surface exactly the models that were actually called
+   *  within the 24h window. */
+  private seen = new Map<string, number>();
   constructor(
     private threshold: number,
     private keysEnabled: boolean,
@@ -34,7 +35,7 @@ export class FallbackState {
     private reporter?: Reporter,
     private holdMs: number = 5 * 60 * 1000,
     private confirmations: number = 3,
-    private now: () => number = () => Date.now(),
+    private nowFn: () => number = () => Date.now(),
   ) {}
 
   state(model: string): ModelState {
@@ -58,12 +59,34 @@ export class FallbackState {
   }
 
   knownModels(): string[] {
-    return [...this.seen];
+    return [...this.seen.keys()];
+  }
+
+  /** Unix ms of the most recent time this model was routed (0 if never). */
+  lastSeenAt(model: string): number {
+    return this.seen.get(model) ?? 0;
+  }
+
+  /** Record that this model was routed right now. */
+  private touch(model: string) {
+    this.seen.set(model, this.nowFn());
+  }
+
+  /** Current clock value used for routing timestamps (injectable in tests). */
+  clock(): number {
+    return this.nowFn();
+  }
+
+  /** Public entry point used by the upstream client / handler to mark that
+   *  a request for this model reached the routing path (before any retry or
+   *  fallback decision), so "called" means "attempted", not only "succeeded". */
+  noteCall(model: string) {
+    this.touch(model);
   }
 
   recordNoKeyFailure(model: string): boolean {
     if (!this.keysEnabled) return false;
-    this.seen.add(model);
+    this.touch(model);
     let st = this.models.get(model);
     if (!st) {
       st = { keyMode: false, noKeyFails: 0, keyedFail: false, keyedAt: 0, probeStreak: 0 };
@@ -76,7 +99,7 @@ export class FallbackState {
       this.log.info("no-key upstream failing repeatedly, switching model to API-key mode", { model, failures: st.noKeyFails });
       st.keyMode = true;
       st.noKeyFails = 0;
-      st.keyedAt = this.now();
+      st.keyedAt = this.nowFn();
       st.probeStreak = 0;
       this.emit(model, "anonymous", "keyed", "anonymous_failures", "anonymous requests failed repeatedly");
       return true;
@@ -86,7 +109,7 @@ export class FallbackState {
 
   forceSwitchToKey(model: string): boolean {
     if (!this.keysEnabled) return false;
-    this.seen.add(model);
+    this.touch(model);
     let st = this.models.get(model);
     if (!st) {
       st = { keyMode: false, noKeyFails: 0, keyedFail: false, keyedAt: 0, probeStreak: 0 };
@@ -96,14 +119,14 @@ export class FallbackState {
     this.log.info("upstream non-2xx, switching model to API-key mode", { model });
     st.keyMode = true;
     st.noKeyFails = 0;
-    st.keyedAt = this.now();
+    st.keyedAt = this.nowFn();
     st.probeStreak = 0;
     this.emit(model, "anonymous", "keyed", "upstream_error", "first non-2xx response");
     return true;
   }
 
   recordNoKeySuccess(model: string) {
-    this.seen.add(model);
+    this.touch(model);
     if (!this.keysEnabled) return;
     let st = this.models.get(model);
     if (!st) {
@@ -115,7 +138,7 @@ export class FallbackState {
   }
 
   takeProbeResult(model: string, ok: boolean): boolean {
-    this.seen.add(model);
+    this.touch(model);
     if (!this.keysEnabled) return false;
     if (!this.probesActive(model)) return false;
     const st = this.models.get(model);
@@ -156,13 +179,13 @@ export class FallbackState {
     if (!this.keysEnabled) return false;
     const st = this.models.get(model);
     if (!st || !st.keyMode) return false;
-    if (this.now() - st.keyedAt < this.holdMs) return false; // inside the hold window
+    if (this.nowFn() - st.keyedAt < this.holdMs) return false; // inside the hold window
     return st.probeStreak < this.confirmations;
   }
 
   reportKeyedResult(model: string, ok: boolean, detail: string) {
     if (!this.keysEnabled) return;
-    this.seen.add(model);
+    this.touch(model);
     const st = this.models.get(model);
     if (!st || !st.keyMode) return;
     let from = "";

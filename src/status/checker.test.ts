@@ -216,3 +216,45 @@ test("restoreDraft ignores corrupt store content", async () => {
   await c.restoreDraft();
   expect(c.snapshot().models.length).toBe(0);
 });
+
+test("models with no event in the window are dropped from the snapshot", () => {
+  let t = 1_000_000;
+  const c = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, now: () => t });
+  // m1 was last seen 25h ago: even though it switched to keyed then, a model
+  // nobody calls anymore must leave the page after 24h.
+  c.ingest({ model: "m1", to: "keyed", from: "anonymous", at: t - 25 * 3600 * 1000 });
+  c.ingest({ model: "m2", to: "anonymous", at: t });
+  const snap = c.snapshot();
+  expect(snap.models.map((m) => m.model)).toEqual(["m2"]);
+  expect(snap.timeline.map((e) => e.model)).toEqual(["m2"]);
+  // A fresh call before the 24h boundary keeps the model visible.
+  t += 23 * 3600 * 1000;
+  c.ingest({ model: "m1", to: "anonymous", from: "keyed", at: t });
+  expect(c.snapshot().models.map((m) => m.model).sort()).toEqual(["m1", "m2"]);
+});
+
+test("restoreDraft drops models whose events fell outside the window", async () => {
+  const file = join(tmpdir(), "checker-restore-expired-" + Math.random().toString(36).slice(2) + ".json");
+  const store = new JsonStore(file);
+  const t = 5_000_000;
+  const first = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, store, now: () => t });
+  first.ingest({ model: "old", to: "keyed", from: "anonymous", at: t - 30 * 3600 * 1000 });
+  first.ingest({ model: "fresh", to: "anonymous", at: t });
+  store.save({ v: 1, savedAt: t, models: first.snapshot().models, timeline: first.snapshot().timeline });
+  await store.flush();
+
+  const second = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, store: new JsonStore(file), now: () => t + 1 });
+  await second.restoreDraft();
+  const snap = second.snapshot();
+  expect(snap.models.map((m) => m.model)).toEqual(["fresh"]);
+});
+
+test("pruneModels removes models the proxy no longer lists", () => {
+  const c = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, now: () => 1_000_000 });
+  c.ingest({ model: "keep", to: "anonymous", at: 1_000_000 });
+  c.ingest({ model: "gone", to: "keyed", from: "anonymous", at: 1_000_000 });
+  (c as unknown as { pruneModels: (keep: Set<string>) => void }).pruneModels(new Set(["keep"]));
+  const snap = c.snapshot();
+  expect(snap.models.map((m) => m.model)).toEqual(["keep"]);
+  expect(snap.timeline.map((e) => e.model)).toEqual(["keep"]);
+});

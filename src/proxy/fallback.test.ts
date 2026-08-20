@@ -29,7 +29,7 @@ describe("recovery hold + confirmations", () => {
   test("key mode is held for the hold window before probes are allowed", () => {
     const { fs } = make({ holdMs: 300_000 });
     let t = 0;
-    (fs as unknown as { now: () => number }).now = () => t;
+    (fs as unknown as { nowFn: () => number }).nowFn = () => t;
     fs.forceSwitchToKey("m1");
     expect(fs.state("m1")).toBe("keyed");
     // Inside the hold window: probes must be skipped entirely.
@@ -46,7 +46,7 @@ describe("recovery hold + confirmations", () => {
   test("switches back to anonymous only after N consecutive probe successes", () => {
     const { fs, events } = make({ holdMs: 300_000, confirmations: 3 });
     let t = 0;
-    (fs as unknown as { now: () => number }).now = () => t;
+    (fs as unknown as { nowFn: () => number }).nowFn = () => t;
     fs.forceSwitchToKey("m1");
     t = 300_000;
     // Two successes: still keyed and probes stay active.
@@ -64,7 +64,7 @@ describe("recovery hold + confirmations", () => {
   test("a failed probe resets the streak without leaving key mode", () => {
     const { fs, events } = make({ holdMs: 300_000, confirmations: 3 });
     let t = 0;
-    (fs as unknown as { now: () => number }).now = () => t;
+    (fs as unknown as { nowFn: () => number }).nowFn = () => t;
     fs.forceSwitchToKey("m1");
     t = 300_000;
     expect(fs.takeProbeResult("m1", true)).toBe(false);
@@ -83,7 +83,7 @@ describe("recovery hold + confirmations", () => {
   test("no probes while the hold window is active even with success", () => {
     const { fs } = make({ holdMs: 300_000, confirmations: 3 });
     let t = 0;
-    (fs as unknown as { now: () => number }).now = () => t;
+    (fs as unknown as { nowFn: () => number }).nowFn = () => t;
     fs.forceSwitchToKey("m1");
     t = 100_000;
     expect(fs.takeProbeResult("m1", true)).toBe(false);
@@ -94,7 +94,7 @@ describe("recovery hold + confirmations", () => {
   test("confirmations=1 switches back on a single probe success", () => {
     const { fs } = make({ holdMs: 300_000, confirmations: 1 });
     let t = 0;
-    (fs as unknown as { now: () => number }).now = () => t;
+    (fs as unknown as { nowFn: () => number }).nowFn = () => t;
     fs.forceSwitchToKey("m1");
     t = 300_000;
     expect(fs.takeProbeResult("m1", true)).toBe(true);
@@ -104,7 +104,7 @@ describe("recovery hold + confirmations", () => {
   test("probe flow starts from anonymous after a failed non-2xx switch", () => {
     const { fs } = make({ holdMs: 300_000, confirmations: 3 });
     let t = 0;
-    (fs as unknown as { now: () => number }).now = () => t;
+    (fs as unknown as { nowFn: () => number }).nowFn = () => t;
     fs.recordNoKeyFailure("m1");
     fs.recordNoKeyFailure("m1"); // threshold=2 -> keyed
     expect(fs.state("m1")).toBe("keyed");
@@ -118,7 +118,7 @@ describe("status visibility", () => {
   test("model stays keyed through hold and probing; recovered only at the end", () => {
     const { fs } = make({ holdMs: 300_000, confirmations: 3 });
     let t = 0;
-    (fs as unknown as { now: () => number }).now = () => t;
+    (fs as unknown as { nowFn: () => number }).nowFn = () => t;
     fs.forceSwitchToKey("m1");
     expect(fs.state("m1")).toBe("keyed");
     t = 300_000;

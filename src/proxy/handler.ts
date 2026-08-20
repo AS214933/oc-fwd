@@ -24,10 +24,59 @@ import {
   renderResponsesEventsFromCompletion, renderMessagesEventsFromCompletion, renderGeminiEventFromCompletion,
   type SseEvent,
 } from "../convert/stream";
+
+/** Status visibility window: a model only shows up if routed within this span. */
+const STATUS_WINDOW_MS = 24 * 60 * 60 * 1000;
 import type { ChatChunk } from "../convert/types";
 
 type InboundFormat = "chat" | "responses" | "messages";
 type OutboundProtocol = "chat" | "responses" | "messages" | "gemini";
+
+/**
+ * Decide which models the status page should surface. Only models actually
+ * routed within the retention window appear (an empty ZEN_MODELS must not
+ * dump every catalog id into the page); anything still in keyed state stays
+ * visible even without fresh traffic so an in-flight degradation cannot
+ * silently vanish. Aliases appear only once actually called.
+ */
+export interface DebugModeSource {
+  knownModels(): string[];
+  lastSeenAt(model: string): number;
+  modelState(model: string): string;
+  keyedModels(): string[];
+}
+
+export interface DebugModeEntry {
+  model: string;
+  state: string;
+}
+
+export function debugVisibleModels(
+  now: number,
+  windowMs: number,
+  src: DebugModeSource,
+  apiKeysEnabled: boolean,
+  modelMap: Record<string, string>,
+): DebugModeEntry[] {
+  const cutoff = now - windowMs;
+  const states: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const model of src.knownModels()) {
+    if (src.lastSeenAt(model) >= cutoff || src.modelState(model) !== "anonymous") {
+      states[model] = src.modelState(model);
+    }
+  }
+  if (apiKeysEnabled) {
+    for (const model of src.keyedModels()) {
+      states[model] = src.modelState(model);
+    }
+  }
+  for (const alias of Object.keys(modelMap)) {
+    if (src.lastSeenAt(alias) >= cutoff && !states[alias]) states[alias] = "anonymous";
+  }
+  return Object.keys(states)
+    .sort()
+    .map((model) => ({ model, state: states[model] ?? "unknown" }));
+}
 
 export class Proxy {
   private upstream: UpstreamClient;
@@ -138,6 +187,10 @@ export class Proxy {
     if (!upstreamModel) {
       return errorResponse(400, `model "${clientModel}" is not allowed by this proxy`, "model_not_found");
     }
+    // A reachable model counts as called even before the upstream answers, so
+    // status visibility is driven by real usage (incl. aliases and traffic
+    // that later passes a non-200 straight back to the client).
+    this.upstream.noteCall(clientModel);
 
     const outboundProtocol: OutboundProtocol = this.cfg.forceChatCompletions
       ? "chat"
@@ -381,30 +434,13 @@ export class Proxy {
   }
 
   private handleDebugModes(): Response {
-    const states: Record<string, string> = {};
-    // Seed with every model that has ever been routed (anonymous successes
-    // included), then layer configured models and aliases on top so a model
-    // that is not in ZEN_MODELS still shows up once it has been used.
-    const seen = this.upstream.knownModels();
-    for (const model of seen) {
-      states[model] = this.fallbackState(model);
-    }
-    if (this.cfg.apiKeys.length > 0) {
-      for (const model of this.fallbackModels()) {
-        states[model] = this.fallbackState(model);
-      }
-    }
-    const list =
-      this.cfg.models.length > 0 ? [...this.cfg.models, ...seen] : catalogModelIds();
-    for (const m of list) {
-      if (!states[m]) states[m] = "anonymous";
-    }
-    for (const alias of Object.keys(this.cfg.modelMap)) {
-      if (!states[alias]) states[alias] = "anonymous";
-    }
-    const models = Object.keys(states)
-      .sort()
-      .map((model) => ({ model, state: states[model] }));
+    const models = debugVisibleModels(
+      this.upstream.clock(),
+      STATUS_WINDOW_MS,
+      this.upstream,
+      this.cfg.apiKeys.length > 0,
+      this.cfg.modelMap,
+    );
     return json({ models }, { "X-Zen-Proxy": "1" });
   }
 

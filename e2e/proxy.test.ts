@@ -855,29 +855,50 @@ describe("auth, models, aliases, force modes", () => {
 });
 
 describe("health & debug", () => {
-  test("healthz and debug modes", async () => {
+  test("healthz works", async () => {
     const { url: u } = await startProxy(config);
     const health = await fetch(`${u}/healthz`);
     expect(health.status).toBe(200);
     expect(await health.text()).toBe("ok");
-    const modes = await fetch(`${u}/debug/modes`);
-    expect(modes.status).toBe(200);
-    const body = (await modes.json()) as { models: Array<{ model: string; state: string }> };
-    const gpt = body.models.find((m) => m.model === "gpt-5.6-sol");
-    expect(gpt?.state).toBe("anonymous");
   });
 
-  test("debug modes lists every configured model", async () => {
+  test("debug modes lists no models until one is called", async () => {
+    const { url: u } = await startProxy(config);
+    const modes = await fetch(`${u}/debug/modes`);
+    const body = (await modes.json()) as { models: Array<{ model: string; state: string }> };
+    expect(body.models.length).toBe(0);
+    // Calling a model makes it appear.
+    const res = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(200);
+    const after = await fetch(`${u}/debug/modes`);
+    const body2 = (await after.json()) as { models: Array<{ model: string; state: string }> };
+    expect(body2.models.map((m) => m.model)).toContain("deepseek-v4-flash-free");
+  });
+
+  test("debug modes lists only models actually called", async () => {
     const cfg = await testConfig({ models: ["deepseek-v4-flash-free", "mimo-v2.5-free"], apiKeys: ["k1"] });
     const { url: u } = await startProxy(cfg);
+    const before = await fetch(`${u}/debug/modes`);
+    expect(((await before.json()) as { models: Array<{ model: string }> }).models.length).toBe(0);
+    // Call only deepseek: mimo stays hidden despite being configured.
+    const res = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(200);
     const modes = await fetch(`${u}/debug/modes`);
     const body = (await modes.json()) as { models: Array<{ model: string; state: string }> };
     const names = body.models.map((m) => m.model);
     expect(names).toContain("deepseek-v4-flash-free");
-    expect(names).toContain("mimo-v2.5-free");
+    expect(names).not.toContain("mimo-v2.5-free");
   });
 
-  test("debug modes includes models seen outside ZEN_MODELS once requested", async () => {
+  test("debug modes never lists models rejected by the whitelist", async () => {
     mock.clear();
     mock.setHandler(async (ctx) => {
       if (ctx.path === "/chat/completions") return jsonResponse(chatCompletionJson(ctx.model, "ok"));
@@ -886,11 +907,8 @@ describe("health & debug", () => {
     const cfg = await testConfig({ models: ["deepseek-v4-flash-free"], apiKeys: ["k1"] });
     const { url: u } = await startProxy(cfg);
     // mimo-v2.5-free is NOT in ZEN_MODELS here, so it is rejected by the
-    // whitelist (resolveModel) and never reaches the upstream; the status UI
-    // therefore keeps showing exactly the configured model. The union with
-    // "seen" models matters when the proxy is configured with an empty
-    // ZEN_MODELS (no allowlist) - that case is covered by the failure-path
-    // fallback tests, and this test pins the allowlist behavior.
+    // whitelist (resolveModel) and never reaches the upstream - it must not
+    // appear in debug modes either (calling it is a 400 and not a route).
     const res = await fetch(`${u}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -899,7 +917,6 @@ describe("health & debug", () => {
     expect(res.status).toBe(400);
     const modes = await fetch(`${u}/debug/modes`);
     const body = (await modes.json()) as { models: Array<{ model: string; state: string }> };
-    expect(body.models.map((m) => m.model)).toContain("deepseek-v4-flash-free");
     expect(body.models.map((m) => m.model)).not.toContain("mimo-v2.5-free");
   });
 });

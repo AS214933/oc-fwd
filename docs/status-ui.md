@@ -13,6 +13,7 @@ Status UI 关注的是**各模型的切换情况**：当且仅当某模型在状
 - 页面展示每个模型的当前状态、持续时长、累计切换次数、最近原因，以及完整切换时间线（旧状态 → 新状态 + 原因）。
 - 时间线和模型状态会**落盘持久化**（`STATUS_DB`，默认 `./data/status.json`）：Status UI 重启后自动恢复最近 24h 记录，不丢历史。
 - Status UI 定期拉取反代的 `/debug/modes` 校准：即使 UI 重启或某次上报丢失，页面也能与反代当前真实状态对齐。
+- **只展示被调用过的模型**：某模型只有在最近 24h 内被实际路由过才会出现在页面上。`ZEN_MODELS` 白名单里从未被调用的模型不会显示，`ZEN_MODELS` 留空时也不会把整个模型目录全量列出。仍在 keyed（API Key）状态的模型会继续保留显示，直到它完全离开 24h 窗口，避免进行中的降级无故消失。
 - **401 说明**：反代配了 `ZEN_AUTH_KEY` 时，校准请求也需要凭证。两种方式任选其一：
   - 给 Status UI 配 `STATUS_PROXY_AUTH=<同一个 ZEN_AUTH_KEY>`（Docker Compose 会自动从 `.env` 同步）；
   - 或给反代配 `ZEN_STATUS_TOKEN`、给 Status UI 配 `STATUS_EVENT_TOKEN=<同一个值>`（校准请求用 `X-Status-Token` 访问 `/debug/modes`）。

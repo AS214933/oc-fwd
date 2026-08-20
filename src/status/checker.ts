@@ -68,6 +68,7 @@ export class Checker {
       timeoutMs: number;
       history: number;
       store?: JsonStore;
+      now?: () => number;
     },
   ) {
     this.proxyUrl = opts.proxyUrl;
@@ -77,7 +78,10 @@ export class Checker {
     this.timeoutMs = opts.timeoutMs;
     this.history = opts.history;
     this.store = opts.store;
+    this.now = opts.now ?? (() => Date.now());
   }
+
+  private now: () => number;
 
   start() {
     void this.reconcile();
@@ -106,7 +110,8 @@ export class Checker {
         this.models.set(m.model, { ...m, last_event: m.last_event ?? null });
       }
       this.timeline = (data.timeline || []).filter((e) => e && typeof e.at === "number");
-      this.sweep(Date.now());
+      this.sweepModels(this.now());
+      this.sweep(this.now());
       if (this.timeline.length > this.history) {
         this.timeline = this.timeline.slice(-this.history);
       }
@@ -123,7 +128,8 @@ export class Checker {
   ingest(ev: StateEvent) {
     if (ev.type !== undefined && ev.type !== "" && ev.type !== "state_change") return;
     if (!validState(ev.to)) return;
-    const at = ev.at ?? Date.now();
+    const at = ev.at ?? this.now();
+    this.sweepModels(this.now());
     const view = this.models.get(ev.model) ?? {
       model: ev.model,
       state: "unknown" as State,
@@ -145,6 +151,7 @@ export class Checker {
   }
 
   snapshot(): Snapshot {
+    this.sweepModels(this.now());
     const overall = this.overallState();
     const last = this.timeline[this.timeline.length - 1];
     return {
@@ -172,6 +179,41 @@ export class Checker {
     while (this.timeline.length > 0 && now - (this.timeline[0]?.at ?? 0) > keep) this.timeline.shift();
   }
 
+  /** Drop models whose last reported event is outside the retention window:
+   *  a model nobody called for 24h leaves the page even if its previous
+   *  state was degraded. */
+  private sweepModels(now: number) {
+    const keep = this.windowMs();
+    const cutoff = now - keep;
+    let dropped = false;
+    for (const [model, view] of this.models) {
+      // A model stays visible only while someone keeps calling it: the
+      // last event (any state change or state report) counts as activity.
+      const last = view.last_event?.at ?? view.since;
+      // No event at all, or the last event older than the window: gone.
+      // A negative timestamp (pre-epoch in synthetic tests) is likewise
+      // far older than the window, so no "> 0" guard here.
+      if (last === 0 || last < cutoff) {
+        this.models.delete(model);
+        dropped = true;
+      }
+    }
+    if (dropped) this.queueSave();
+  }
+
+  /** Drop local models the proxy no longer lists (reconcile authority). */
+  private pruneModels(keep: Set<string>) {
+    let dropped = false;
+    for (const model of [...this.models.keys()]) {
+      if (!keep.has(model)) {
+        this.models.delete(model);
+        this.timeline = this.timeline.filter((e) => e.model !== model);
+        dropped = true;
+      }
+    }
+    if (dropped) this.queueSave();
+  }
+
   private overallState(): State {
     if (this.models.size === 0) return "unknown";
     let keyedOrFailed = 0;
@@ -193,9 +235,11 @@ export class Checker {
       });
       if (!res.ok) return;
       const data = (await res.json()) as { models?: Array<{ model: string; state: string }> };
-      const now = Date.now();
+      const now = this.now();
+      const reported = new Set<string>();
       for (const m of data.models ?? []) {
         if (!validState(m.state)) continue;
+        reported.add(m.model);
         const known = this.models.get(m.model)?.state;
         if (known === m.state) continue;
         this.ingest({
@@ -206,6 +250,10 @@ export class Checker {
           at: now,
         });
       }
+      // The proxy's /debug/modes is authoritative about which models are
+      // still visible: anything it no longer lists (e.g. not called in 24h)
+      // must leave this store too, even if its last event is < 24h old.
+      this.pruneModels(reported);
       this.lastReconcile = now;
       this.queueSave();
     } catch {
