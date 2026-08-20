@@ -100,6 +100,28 @@ test("parses close-delimited bodies", async () => {
   expect(body.toString()).toBe("streamed till end");
 });
 
+test("reports a truncated Content-Length body only to its response reader", async () => {
+  const server = net.createServer((sock) => {
+    sock.once("data", () => {
+      sock.end("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhi");
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  try {
+    const tcp = net.connect({ port, host: "127.0.0.1" });
+    const result = await http1Request({
+      tcp,
+      tls: false,
+      request: "GET / HTTP/1.1\r\nHost: mock\r\nConnection: close\r\n\r\n",
+      totalTimeoutMs: 5000,
+    });
+    await expect(collect(result.body)).rejects.toThrow("upstream connection closed before body complete");
+  } finally {
+    server.close();
+  }
+});
+
 
 /**
  * Byte-level SSE passthrough (chat -> chat streaming fast path). The upstream

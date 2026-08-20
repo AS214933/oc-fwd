@@ -231,6 +231,11 @@ export function http1Request(opts: Http1RequestOptions): Promise<Http1Result> {
         bodyMode = "until-end";
       }
       bodyReadable = new Readable({ read() { /* pushed from socket data */ } });
+      // A body failure can happen after the response head has resolved but
+      // before a web-stream adapter attaches. Keep a listener so Node/Bun
+      // does not turn that transport failure into an unhandled process error;
+      // other listeners still receive the same error for this request.
+      bodyReadable.on("error", () => {});
       const result: Http1Result = {
         status: Number(m[1]),
         headers,
