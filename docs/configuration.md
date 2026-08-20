@@ -33,6 +33,7 @@
 | `ZEN_CIRCUIT_COOLDOWN_SECONDS` | `30` | 熔断冷却期 |
 | `ZEN_MAX_BODY_MB` | `128` | 请求体上限（MB） |
 | `ZEN_UPSTREAM_TIMEOUT_SECONDS` | `600` | 非流式请求超时；`0` = 不限制 |
+| `ZEN_RESPONSES_KEEPALIVE_SECONDS` | `15` | `/v1/responses` 流式无输出时发送 `response.in_progress` 的间隔；防止 Codex SSE 空闲超时；`0` = 关闭 |
 | `ZEN_MAX_CONCURRENCY` | `0` | 并发上限；`0` = 不限制 |
 | `LOG_LEVEL` | `info` | debug / info / warn / error |
 

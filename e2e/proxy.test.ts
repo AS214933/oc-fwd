@@ -247,6 +247,48 @@ describe("automatic per-model outbound conversion", () => {
 });
 
 describe("streaming", () => {
+  test("Responses stream emits keepalives before a slow DeepSeek first token", async () => {
+    mock.clear();
+    mock.setHandler(async (ctx) => {
+      if (ctx.path !== "/chat/completions") return jsonResponse({});
+      const enc = new TextEncoder();
+      const role = { id: "chatcmpl_1", object: "chat.completion.chunk", model: ctx.model, created: 1700000000, choices: [{ index: 0, delta: { role: "assistant" } }] };
+      const text = { id: "chatcmpl_1", object: "chat.completion.chunk", model: ctx.model, created: 1700000000, choices: [{ index: 0, delta: { content: "after-thinking" } }] };
+      const done = { id: "chatcmpl_1", object: "chat.completion.chunk", model: ctx.model, created: 1700000000, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] };
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await sleep(100);
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(role)}\n\ndata: ${JSON.stringify(text)}\n\ndata: ${JSON.stringify(done)}\n\ndata: [DONE]\n\n`));
+          controller.close();
+        },
+      });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
+    });
+    const cfg = await testConfig({ responsesKeepaliveMs: 20 });
+    const { server, url: u } = await startProxy(cfg);
+    try {
+      const res = await fetch(`${u}/v1/responses`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "deepseek-v4-flash-free", input: "wait", stream: true }),
+      });
+      expect(res.status).toBe(200);
+      const events = await collectData(res);
+      const payloads = events.flatMap((event) => {
+        try {
+          return [JSON.parse(event.data) as { type?: string; delta?: string }];
+        } catch {
+          return [];
+        }
+      });
+      expect(payloads.filter((payload) => payload.type === "response.in_progress").length).toBeGreaterThanOrEqual(1);
+      expect(payloads.some((payload) => payload.type === "response.output_text.delta" && payload.delta === "after-thinking")).toBe(true);
+      expect(payloads.some((payload) => payload.type === "response.completed")).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("chat stream -> responses outbound -> chat chunk events", async () => {
     mock.setHandler(async (ctx) => {
       if (ctx.path === "/responses") return responsesSSE(ctx.model, [{ text: "abc" }, { text: "def" }]);

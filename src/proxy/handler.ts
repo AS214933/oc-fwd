@@ -351,7 +351,10 @@ export class Proxy {
     }
     if (alias) chunks = mapChunks(chunks, (ch) => ({ ...ch, model: alias }));
     const sse = encodeChunksToClient(chunks, clientFormat);
-    return new Response(sseToStream(sse, () => resp.destroy?.()), {
+    const keepalive = clientFormat === "responses" && this.cfg.responsesKeepaliveMs > 0
+      ? { event: responsesKeepaliveEvent(), intervalMs: this.cfg.responsesKeepaliveMs }
+      : undefined;
+    return new Response(sseToStream(sse, () => resp.destroy?.(), keepalive), {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -498,6 +501,19 @@ class BodyError extends Error {
 
 function isSSE(contentType: string): boolean {
   return contentType.toLowerCase().includes("text/event-stream");
+}
+
+function responsesKeepaliveEvent(): SseEvent {
+  // Codex resets its stream idle timer only after a complete SSE event, so a
+  // comment heartbeat is insufficient. It accepts response.in_progress as a
+  // valid no-op while the upstream is still thinking.
+  return {
+    event: undefined,
+    data: JSON.stringify({
+      type: "response.in_progress",
+      response: { id: "resp_1", object: "response", status: "in_progress", output: [] },
+    }),
+  };
 }
 
 function isDeepSeekModel(model: string): boolean {
@@ -696,23 +712,50 @@ export function ssePassthrough(stream: ReadableStream<Uint8Array>, onCancel: () 
 
 const encoderBytes = new TextEncoder();
 
-function sseToStream(sse: AsyncGenerator<SseEvent>, onCancel: () => void): ReadableStream<Uint8Array> {
+function sseToStream(
+  sse: AsyncGenerator<SseEvent>,
+  onCancel: () => void,
+  keepalive?: { event: SseEvent; intervalMs: number },
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
+  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
+  let closed = false;
+  const clearKeepalive = () => {
+    if (keepaliveTimer) clearTimeout(keepaliveTimer);
+    keepaliveTimer = null;
+  };
   return new ReadableStream<Uint8Array>({
     async start(controller) {
+      const resetKeepalive = () => {
+        clearKeepalive();
+        if (!keepalive || closed) return;
+        keepaliveTimer = setTimeout(() => {
+          if (closed) return;
+          controller.enqueue(encoder.encode(sseText(keepalive.event.event, keepalive.event.data)));
+          resetKeepalive();
+        }, keepalive.intervalMs);
+      };
       try {
         let count = 0;
+        resetKeepalive();
         for await (const ev of sse) {
           controller.enqueue(encoder.encode(sseText(ev.event, ev.data)));
           count++;
+          resetKeepalive();
         }
         if (count === 0) controller.enqueue(encoder.encode("\n"));
+        closed = true;
+        clearKeepalive();
         controller.close();
       } catch (err) {
+        closed = true;
+        clearKeepalive();
         controller.error(err);
       }
     },
     cancel() {
+      closed = true;
+      clearKeepalive();
       onCancel();
     },
   });

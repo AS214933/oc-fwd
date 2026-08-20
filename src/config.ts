@@ -41,6 +41,7 @@ export interface Config {
   maxBodyBytes: number;
   upstreamTimeoutMs: number;
   upstreamTimeoutSet: boolean;
+  responsesKeepaliveMs: number;
   maxConcurrency: number;
   logLevel: string;
 }
@@ -145,12 +146,16 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
   const noKeyHold = envFloat("ZEN_NO_KEY_RECOVERY_HOLD_SECONDS", 300, env);
   const noKeyConfirm = envInt("ZEN_NO_KEY_RECOVERY_CONFIRMATIONS", 3, env);
   const upstreamTimeout = envFloat("ZEN_UPSTREAM_TIMEOUT_SECONDS", 600, env);
+  const responsesKeepalive = envFloat("ZEN_RESPONSES_KEEPALIVE_SECONDS", 15, env);
 
   if (!listen) throw new Error("LISTEN_ADDR cannot be empty");
   if (dialTimeout <= 0) throw new Error(`invalid ZEN_DIAL_TIMEOUT_SECONDS ${dialTimeout}: must be > 0`);
   if (dnsCacheTTL < 0) throw new Error(`invalid ZEN_DNS_CACHE_TTL_SECONDS ${dnsCacheTTL}: must be >= 0`);
   if (retryMaxBackoff < 0) {
     throw new Error(`invalid ZEN_RETRY_MAX_BACKOFF_SECONDS ${retryMaxBackoff}: must be >= 0`);
+  }
+  if (responsesKeepalive < 0) {
+    throw new Error(`invalid ZEN_RESPONSES_KEEPALIVE_SECONDS ${responsesKeepalive}: must be >= 0`);
   }
 
   const cfg: Config = {
@@ -185,6 +190,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     maxBodyBytes: envInt("ZEN_MAX_BODY_MB", 128, env) * 1024 * 1024,
     upstreamTimeoutMs: upstreamTimeout * 1000,
     upstreamTimeoutSet: upstreamTimeout > 0,
+    responsesKeepaliveMs: responsesKeepalive * 1000,
     maxConcurrency: envInt("ZEN_MAX_CONCURRENCY", 0, env) as number,
     logLevel: envStr("LOG_LEVEL", "info", env),
   };
