@@ -38,6 +38,7 @@ export interface Config {
   retryMax: number;
   retryBaseBackoffMs: number;
   retryMaxBackoffMs: number;
+  fastRetry5xx: boolean;
   circuitFailures: number;
   circuitCooldownMs: number;
   maxBodyBytes: number;
@@ -193,6 +194,9 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     retryMax: envInt("ZEN_RETRY_MAX", 3, env) as number,
     retryBaseBackoffMs: retryBackoff * 1000,
     retryMaxBackoffMs: retryMaxBackoff * 1000,
+    // Default: fast 5xx/network retries only when each attempt gets a fresh
+    // connection (rotating exit). With connection reuse, keep the backoff.
+    fastRetry5xx: envBool("ZEN_RETRY_FAST_5XX", envBool("ZEN_ROTATE_IP", true, env), env),
     circuitFailures: envInt("ZEN_CIRCUIT_FAILURES", 5, env),
     circuitCooldownMs: circuitCooldown * 1000,
     maxBodyBytes: envInt("ZEN_MAX_BODY_MB", 128, env) * 1024 * 1024,

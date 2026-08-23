@@ -1127,6 +1127,58 @@ describe("retry + fallback", () => {
     expect(calls).toBe(3);
   });
 
+  test("5xx retries immediately when ZEN_RETRY_FAST_5XX is on (fresh exit per attempt)", async () => {
+    let calls = 0;
+    mock.setHandler(async (ctx) => {
+      calls++;
+      if (calls === 1 && ctx.path === "/chat/completions") {
+        return jsonResponse({ error: { type: "server_error", message: "Error from provider (Console): Upstream request failed: Endpoint is unavailable." } }, 503);
+      }
+      return jsonResponse(chatCompletionJson(ctx.model, "fast-retry-ok"));
+    });
+    const cfg = await testConfig({
+      retryMax: 3,
+      retryBaseBackoffMs: 60_000,
+      retryMaxBackoffMs: 60_000, // would hang the test if the ladder were used
+      fastRetry5xx: true,
+    });
+    const { url: u } = await startProxy(cfg);
+    const t0 = Date.now();
+    const res = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(200);
+    expect(calls).toBe(2);
+    expect(Date.now() - t0).toBeLessThan(5000); // no 60s backoff sleep happened
+  });
+
+  test("5xx keeps the exponential ladder when fast retry is disabled", async () => {
+    let calls = 0;
+    mock.setHandler(async (ctx) => {
+      calls++;
+      if (calls === 1 && ctx.path === "/chat/completions") {
+        return jsonResponse({ error: { type: "server_error", message: "Endpoint is unavailable." } }, 503);
+      }
+      return jsonResponse(chatCompletionJson(ctx.model, "laddered-ok"));
+    });
+    const cfg = await testConfig({
+      retryMax: 3,
+      retryBaseBackoffMs: 10,
+      retryMaxBackoffMs: 20,
+      fastRetry5xx: false,
+    });
+    const { url: u } = await startProxy(cfg);
+    const res = await fetch(`${u}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
   test("anonymous failure falls back to API key with keyed retry", async () => {
     mock.setHandler(async (ctx) => {
       if (ctx.path === "/chat/completions") {

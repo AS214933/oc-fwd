@@ -136,7 +136,7 @@ export class UpstreamClient {
         resp = await this.rawRequest(path, body, stream, key, hasKey, signal);
       } catch (err) {
         this.log.debug("upstream attempt failed", { attempt, error: String(err) });
-        const wait = this.backoff(attempt, 0);
+        const wait = this.fastOrBackoff(attempt, 0);
         if (!wait.ok) {
           if (!hasKey && (this.fallback.recordNoKeyFailure(model) || this.fallback.inKeyMode(model))) {
             attempt = 0;
@@ -207,7 +207,7 @@ export class UpstreamClient {
           attempt = 0;
           continue;
         }
-        const wait = this.backoff(attempt, retryAfterSeconds(resp));
+        const wait = this.fastOrBackoff(attempt, retryAfterSeconds(resp), resp.status);
         if (wait.ok) {
           resp.destroy?.();
           await sleep(wait.ms, signal);
@@ -235,6 +235,23 @@ export class UpstreamClient {
     const mult = Math.pow(2, Math.min(attempt, 20));
     const jitter = Math.floor(Math.random() * (base / 2 + 1));
     return { ms: Math.min(base * mult + jitter, this.cfg.retryMaxBackoffMs), ok: true };
+  }
+
+  /**
+   * Retry pacing for non-429 failures. With per-request fresh connections
+   * (ZEN_ROTATE_IP / socks5) every attempt already lands on a new random exit
+   * IP, so sleeping before a 5xx / network-error retry adds latency without
+   * improving the odds — the next attempt cannot be throttled "harder" on the
+   * same path. Retry immediately in that setup; keep the classic exponential
+   * ladder otherwise. 429 keeps its ladder either way (rate limits need wall-
+   * clock cooling), and an explicit Retry-After always wins.
+   */
+  private fastOrBackoff(attempt: number, retryAfter: number, status?: number): { ms: number; ok: boolean } {
+    if (this.cfg.fastRetry5xx && retryAfter <= 0 && (status === undefined || status >= 500)) {
+      if (attempt >= this.cfg.retryMax) return { ms: 0, ok: false };
+      return { ms: 0, ok: true };
+    }
+    return this.backoff(attempt, retryAfter);
   }
 
   /** One HTTP(S) POST request to the upstream, no retries. */
