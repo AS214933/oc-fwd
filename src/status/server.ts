@@ -21,7 +21,9 @@ export function loadStatusConfig(env: NodeJS.ProcessEnv = process.env): StatusUI
   const listen = env.STATUS_LISTEN_ADDR || ":8090";
   const interval = Number(env.STATUS_INTERVAL || "15");
   const timeout = Number(env.STATUS_TIMEOUT || "30");
-  const history = Number(env.STATUS_HISTORY || "120");
+  // STATUS_HISTORY is a compatibility alias for the retention window in
+  // seconds (120 = the sentinel for "use the 24h default").
+  const history = Number(env.STATUS_HISTORY || env.STATUS_WINDOW_SECONDS || "120");
   const storeFile = env.STATUS_DB || defaultStoreFile();
   if (!listen) throw new Error("STATUS_LISTEN_ADDR cannot be empty");
   if (!storeFile) throw new Error("STATUS_DB cannot be empty when set");

@@ -41,12 +41,22 @@ test("ingest records each real switch exactly once", () => {
   expect(m1?.state).toBe("keyed_failed");
 });
 
-test("timeline is bounded by history", () => {
-  const c = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 3 });
+test("timeline is bounded by maxEvents even inside the window", () => {
+  const c = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, maxEvents: 3 });
   for (let i = 0; i < 10; i++) {
     c.ingest({ model: "m1", to: i % 2 ? "keyed" : "anonymous", from: i % 2 ? "anonymous" : "keyed" });
   }
   expect(c.snapshot().timeline.length).toBe(3);
+});
+
+test("a busy timeline is not truncated by the window sentinel (history=120)", () => {
+  const c = new Checker(quietLogger(), { proxyUrl: "http://x", proxyAuth: "", intervalMs: 1000, timeoutMs: 1000, history: 120, now: () => 1_000_000 });
+  for (let i = 0; i < 500; i++) {
+    c.ingest({ model: "m1", to: i % 2 ? "keyed" : "anonymous", from: i % 2 ? "anonymous" : "keyed" });
+  }
+  // All 500 switches happened "instantly" (same synthetic clock): the window
+  // sweep keeps them all, only the hard cap would trim — and it is far above.
+  expect(c.snapshot().timeline.length).toBe(500);
 });
 
 test("reconcile does not flood timeline when states are unchanged", async () => {

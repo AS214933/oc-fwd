@@ -2,8 +2,11 @@
   "use strict";
 
   // ── Constants ─────────────────────────────────────────────
+  // The server (Checker) owns the full 24h timeline; the client renders it
+  // as-is. No per-device state is kept: localStorage copies diverged across
+  // devices (each browser saw a different slice of history), so they were
+  // removed — every device now renders the exact same server snapshot.
   var H24 = 24 * 60 * 60 * 1000;
-  var STORE_KEY = "zenproxy.status.history.v1";
 
   var STATES = {
     anonymous:   { label: "Operational",      cls: "green",  pill: "pill-green"  },
@@ -73,55 +76,12 @@
     return ev.detail ? r + " · " + ev.detail : r;
   }
 
-  // ── Local history (localStorage, keeps last 24h) ──────────
-  function loadHistory() {
-    try {
-      var raw = localStorage.getItem(STORE_KEY);
-      if (!raw) return [];
-      var arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return [];
-      var cutoff = nowMs() - H24;
-      return arr.filter(function (e) { return e && e.at && e.at >= cutoff; });
-    } catch (e) { return []; }
-  }
-
-  function saveHistory(evs) {
-    try {
-      var cutoff = nowMs() - H24;
-      var kept = (evs || []).filter(function (e) { return e && e.at && e.at >= cutoff; });
-      // Cap the payload to avoid unbounded localStorage growth.
-      if (kept.length > 1000) kept = kept.slice(kept.length - 1000);
-      localStorage.setItem(STORE_KEY, JSON.stringify(kept));
-    } catch (e) { /* storage full / unavailable: ignore */ }
-  }
-
-  function mergeEvents(a, b) {
-    var seen = {};
-    var out = [];
-    a.concat(b).forEach(function (e) {
-      if (!e || !e.at) return;
-      var key = e.model + "@" + e.at + "#" + (e.reason || "") + "#" + (e.to || "");
-      if (seen[key]) return;
-      seen[key] = 1;
-      out.push(e);
-    });
-    out.sort(function (x, y) { return x.at - y.at; });
-    return out;
-  }
-
-  // Persist the incoming snapshot into localStorage so the page keeps the
-  // last 24h of status history even across reloads / server restarts.
-  function persistSnapshot(snap) {
-    var evs = (snap && snap.timeline) || [];
-    var stored = loadHistory();
-    saveHistory(mergeEvents(stored, evs));
-  }
-
   // ── Uptime bar ────────────────────────────────────────────
-  // Render the last 24h as 48 half-hour segments.
-  function uptimeBar(model, timeline, nowMsVal) {
+  // Render the retention window (server-reported, default 24h) as 48
+  // segments. Anchored to the server window so every device draws the same
+  // bar from the same timeline.
+  function uptimeBar(model, timeline, nowMsVal, spanMs) {
     var segs = 48;
-    var spanMs = H24;
     var evs = (timeline || []).filter(function (e) {
       return e.model === model && STATES[e.to];
     }).sort(function (a, b) { return a.at - b.at; });
@@ -136,6 +96,8 @@
     for (var s = 0; s < segs; s++) {
       var t0 = start + s * segDur;
       var t1 = t0 + segDur;
+      // State before any event in the window is unknown; walk events up to
+      // this segment.
       var state = "unknown";
       for (var j = 0; j < evs.length; j++) {
         if (evs[j].at <= t0) state = evs[j].to;
@@ -147,17 +109,10 @@
   }
 
   // ── Rendering ─────────────────────────────────────────────
-  var history = [];
-
   function render(snap) {
-    // Track a local 24h history overlay: merge server timeline with whatever
-    // we already stored so the bar keeps showing the last 24h even when the
-    // server only reports a shorter window.
-    var serverEvs = (snap && snap.timeline) || [];
-    history = mergeEvents(history, serverEvs);
-    var cutoff = nowMs() - H24;
-    history = history.filter(function (e) { return e.at >= cutoff; });
-    var timeline = history;
+    // Render strictly from the server snapshot: identical on every device.
+    var timeline = (snap && snap.timeline) || [];
+    var spanMs = (snap && snap.window_ms) > 0 ? snap.window_ms : H24;
 
     var overall = STATES[snap.overall] ? snap.overall : "unknown";
     var ov = OVERALL[overall] || OVERALL.unknown;
@@ -180,7 +135,7 @@
     } else {
       grid.innerHTML = models.map(function (m) {
         var st = STATES[m.state] || STATES.unknown;
-        var bar = uptimeBar(m.model, timeline, nowMs());
+        var bar = uptimeBar(m.model, timeline, nowMs(), spanMs);
         var detail = "Duration " + ago(m.since) + " · Switches " + m.switches;
         var reason = reasonText(m.last_event);
         if (reason) detail += " · " + reason;
@@ -202,7 +157,7 @@
       // Group by date
       var groups = {};
       var order = [];
-      timeline.slice(-80).reverse().forEach(function (ev) {
+      timeline.slice(-200).reverse().forEach(function (ev) { // DOM cap on very long timelines
         var dk = dateKey(ev.at);
         if (!groups[dk]) { groups[dk] = []; order.push(dk); }
         groups[dk].push(ev);
@@ -230,10 +185,7 @@
   function poll() {
     fetch("/api/status", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
-      .then(function (snap) {
-        persistSnapshot(snap);
-        render(snap);
-      })
+      .then(render)
       .catch(function (err) {
         el("bannerTitle").textContent = "Connection Error";
         el("bannerSub").textContent = err.message;
@@ -241,10 +193,6 @@
       });
   }
 
-  // Boot: pick up any 24h history already stored locally so a reload shows
-  // the last 24h immediately, before the first fetch returns.
-  history = loadHistory();
-  render({ overall: "unknown", models: [], timeline: history, interval: 0, last_reconcile: 0 });
   poll();
   setInterval(poll, 5000);
 })();

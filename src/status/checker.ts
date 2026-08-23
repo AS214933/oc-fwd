@@ -55,7 +55,12 @@ export class Checker {
   private eventToken: string;
   private intervalMs: number;
   private timeoutMs: number;
+  /** Retention window in seconds; the sentinel 120 means the 24h default. */
   private history: number;
+  /** Hard cap on retained events, decoupled from the window: a busy proxy
+   *  must not have its 24h view truncated mid-hour just because switches are
+   *  frequent. The window sweep remains the primary retention mechanism. */
+  private maxEvents: number;
   private store?: JsonStore;
 
   constructor(
@@ -67,6 +72,7 @@ export class Checker {
       intervalMs: number;
       timeoutMs: number;
       history: number;
+      maxEvents?: number;
       store?: JsonStore;
       now?: () => number;
     },
@@ -77,6 +83,7 @@ export class Checker {
     this.intervalMs = opts.intervalMs;
     this.timeoutMs = opts.timeoutMs;
     this.history = opts.history;
+    this.maxEvents = opts.maxEvents ?? 4000;
     this.store = opts.store;
     this.now = opts.now ?? (() => Date.now());
   }
@@ -112,8 +119,8 @@ export class Checker {
       this.timeline = (data.timeline || []).filter((e) => e && typeof e.at === "number");
       this.sweepModels(this.now());
       this.sweep(this.now());
-      if (this.timeline.length > this.history) {
-        this.timeline = this.timeline.slice(-this.history);
+      if (this.timeline.length > this.maxEvents) {
+        this.timeline = this.timeline.slice(-this.maxEvents);
       }
       this.log.info("status history restored from disk", {
         file: this.store.path(),
@@ -146,7 +153,7 @@ export class Checker {
     this.models.set(ev.model, view);
     this.timeline.push(entry);
     this.sweep(at);
-    if (this.timeline.length > this.history) this.timeline.shift();
+    if (this.timeline.length > this.maxEvents) this.timeline.shift();
     this.queueSave();
   }
 

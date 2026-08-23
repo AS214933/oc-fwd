@@ -12,6 +12,7 @@ Status UI 关注的是**各模型的切换情况**：当且仅当某模型在状
 - **绿色** = 匿名模式运行中；**蓝色** = 已切换 API Key（匿名失败，降级）；**红色** = key 也失败（全部失败）。
 - 页面展示每个模型的当前状态、持续时长、累计切换次数、最近原因，以及完整切换时间线（旧状态 → 新状态 + 原因）。
 - 时间线和模型状态会**落盘持久化**（`STATUS_DB`，默认 `./data/status.json`）：Status UI 重启后自动恢复最近 24h 记录，不丢历史。
+- **所有设备看到完全相同的页面**：前端不保存任何本地状态（localStorage 已移除），时间线、uptime 条、事件列表全部来自服务端 `/api/status` 快照，各设备渲染一致（仅时钟显示跟随设备时区）。
 - Status UI 定期拉取反代的 `/debug/modes` 校准：即使 UI 重启或某次上报丢失，页面也能与反代当前真实状态对齐。
 - **只展示被调用过的模型**：某模型只有在最近 24h 内被实际路由过才会出现在页面上。`ZEN_MODELS` 白名单里从未被调用的模型不会显示，`ZEN_MODELS` 留空时也不会把整个模型目录全量列出。仍在 keyed（API Key）状态的模型会继续保留显示，直到它完全离开 24h 窗口，避免进行中的降级无故消失。
 - **401 说明**：反代配了 `ZEN_AUTH_KEY` 时，校准请求也需要凭证。两种方式任选其一：
@@ -40,7 +41,7 @@ Compose 会把 `status-ui-data` volume 挂到 `/data`，Status UI 重启后历�
 | `STATUS_EVENT_TOKEN` | 空 | 上报接口 `/api/events` 的 bearer token（与反代 `ZEN_STATUS_TOKEN` 一致） |
 | `STATUS_INTERVAL` | `15` | 与反代校准的间隔（秒） |
 | `STATUS_TIMEOUT` | `30` | 单次校准请求超时（秒） |
-| `STATUS_HISTORY` | `120` | 保留的切换事件条数（时间线） |
+| `STATUS_HISTORY` | `120` | 时间线保留窗口（秒）；`120` = 使用 24h 默认窗口。事件条数另有独立上限（4000），不会被该值截断 |
 | `STATUS_DB` | `./data/status.json` | 落盘持久化文件路径（Docker 固定 `/data/status.json`，挂 volume 重启不丢） |
 
 ## HTTP 接口
