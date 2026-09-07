@@ -1572,20 +1572,45 @@ describe("session header relay", () => {
     expect(mock.last()?.headers.get("x-opencode-session")).toBe("sess_affinity_client");
   });
 
-  test("omits the header entirely when the caller sends no session id", async () => {
+  test("mints and reuses a sticky opencode-format session id when the caller sends none", async () => {
     mock.clear();
-    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] });
-    expect(mock.last()?.headers.get("x-opencode-session")).toBeNull();
+    const res = await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] });
+    expect(res.status).toBe(200);
+    const first = mock.last()?.headers.get("x-opencode-session") ?? "";
+    expect(first).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+    // Same client (identity: no key, same IP, same UA) reuses its minted id.
+    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "turn 2" }] });
+    expect(mock.last()?.headers.get("x-opencode-session")).toBe(first);
   });
 
-  test("x-opencode-session takes precedence over other session headers", async () => {
+  test("mints distinct session ids per caller identity", async () => {
     mock.clear();
-    await post(
-      { model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] },
-      "/v1/chat/completions",
-      { "x-opencode-session": "ses_primary", "x-session-id": "ses_secondary" },
-    );
-    expect(mock.last()?.headers.get("x-opencode-session")).toBe("ses_primary");
+    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "a" }] }, "/v1/chat/completions", {
+      "User-Agent": "client-a/1.0",
+    });
+    const a = mock.last()?.headers.get("x-opencode-session") ?? "";
+    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "b" }] }, "/v1/chat/completions", {
+      "User-Agent": "client-b/1.0",
+    });
+    const b = mock.last()?.headers.get("x-opencode-session") ?? "";
+    expect(a).toMatch(/^ses_/);
+    expect(b).toMatch(/^ses_/);
+    expect(a).not.toBe(b);
+  });
+
+  test("mints one shared session id per bearer key across different callers", async () => {
+    mock.clear();
+    const headers = { Authorization: "Bearer shared-key" };
+    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "a" }] }, "/v1/chat/completions", {
+      ...headers,
+      "User-Agent": "ua-1",
+    });
+    const first = mock.last()?.headers.get("x-opencode-session") ?? "";
+    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "b" }] }, "/v1/chat/completions", {
+      ...headers,
+      "User-Agent": "ua-2",
+    });
+    expect(mock.last()?.headers.get("x-opencode-session")).toBe(first);
   });
 
   test("relays the session id through /v1/responses and /v1/messages too", async () => {

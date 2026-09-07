@@ -12,6 +12,7 @@ import { Circuit } from "./circuit";
 import { FallbackState } from "./fallback";
 import { Reporter } from "./reporter";
 import { UpstreamClient, CircuitOpenError, type UpstreamModel, type UpstreamResponse } from "./upstream";
+import { SessionIDPool } from "./session";
 import { makeLookup } from "./dial";
 import { parseChatRequest, renderChatRequest, renderChatCompletion, parseChatCompletion, type ChatCompletion, type ChatRequest } from "../convert/chat";
 import { parseResponsesRequest, responsesToChatRequest, chatToResponsesRequest, parseResponsesResponse, renderChatCompletionAsResponses, normalizeToolCallSequence } from "../convert/responses";
@@ -34,6 +35,8 @@ type OutboundProtocol = "chat" | "responses" | "messages" | "gemini";
 
 const REASONING_REPLAY_TTL_MS = 10 * 60 * 1000;
 const MAX_REASONING_REPLAY_ENTRIES = 2048;
+const CALLER_SESSION_TTL_MS = 60 * 60 * 1000;
+const MAX_CALLER_SESSIONS = 4096;
 
 /**
  * DeepSeek identifies the interrupted thinking turn by its tool call IDs.
@@ -149,6 +152,7 @@ export class Proxy {
   private reporter?: Reporter;
   private sem: Semaphore;
   private reasoningReplay = new DeepSeekReasoningReplay();
+  private clientSessions = new SessionIDPool(CALLER_SESSION_TTL_MS, MAX_CALLER_SESSIONS);
 
   constructor(
     private cfg: Config,
@@ -304,8 +308,10 @@ export class Proxy {
     let resp: UpstreamResponse;
     try {
       // Relay the caller's opencode session id so Zen can optimize prompt
-      // caching per conversation (docs/go.md, "可以在哪里使用").
-      resp = await this.upstream.do(path, body, clientStream, callerSessionID(req));
+      // caching per conversation (docs/go.md, "可以在哪里使用"). Callers
+      // without a session header get a sticky, opencode-format id minted per
+      // caller identity so consecutive turns still share a cache key.
+      resp = await this.upstream.do(path, body, clientStream, this.sessionIDFor(req));
     } finally {
       this.sem.release();
     }
@@ -519,6 +525,20 @@ export class Proxy {
     return clientModel;
   }
 
+  /**
+   * Session identity for prompt-cache affinity: OpenCode / Codex send
+   * `x-opencode-session` per conversation, other OpenAI-compatible clients use
+   * the X-Session-Id / x-session-affinity convention (see opencode
+   * session/llm/request.ts). When the caller sends none, mint a stable
+   * opencode-format id keyed by caller identity (bearer key -> caller IP ->
+   * user-agent) so consecutive turns of one client share one cache key.
+   */
+  private sessionIDFor(req: Request): string {
+    const explicit = callerSessionID(req);
+    if (explicit) return explicit;
+    return this.clientSessions.sessionFor(callerIdentity(req));
+  }
+
   private async readJSON(req: Request): Promise<Record<string, unknown>> {
     const buf = await readBodyLimited(req, this.cfg.maxBodyBytes);
     let obj: unknown;
@@ -648,19 +668,31 @@ function isDeepSeekModel(model: string): boolean {
   return model.toLowerCase().startsWith("deepseek-");
 }
 
-/**
- * Session identity for prompt-cache affinity: OpenCode / Codex send
- * `x-opencode-session` per conversation, other OpenAI-compatible clients use
- * the X-Session-Id / x-session-affinity convention (see opencode
- * session/llm/request.ts). Empty when the caller sends nothing.
- */
-export function callerSessionID(req: Request): string {
+/** The caller's own session header, verbatim; empty when none is present. */
+function callerSessionID(req: Request): string {
   return (
     req.headers.get("x-opencode-session") ??
     req.headers.get("x-session-id") ??
     req.headers.get("x-session-affinity") ??
     ""
   );
+}
+
+/**
+ * Fallback identity for minted session ids. Authenticated callers key on
+ * their credential alone (bearer key first, then x-api-key, mirroring
+ * validCallerKey) so everything sent under one account shares one session;
+ * anonymous callers are separated by IP and user-agent.
+ */
+function callerIdentity(req: Request): string {
+  const auth = req.headers.get("Authorization") ?? "";
+  const key = auth.startsWith("Bearer ")
+    ? auth.slice("Bearer ".length).trim()
+    : (req.headers.get("x-api-key") ?? "").trim();
+  if (key) return "key\u0000" + key;
+  const ip = req.headers.get("X-Forwarded-For") ?? req.headers.get("X-Real-IP") ?? "";
+  const ua = req.headers.get("User-Agent") ?? "";
+  return ["anon", ip, ua].join("\u0000");
 }
 
 /**
