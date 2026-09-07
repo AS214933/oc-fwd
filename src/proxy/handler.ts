@@ -303,7 +303,9 @@ export class Proxy {
     await this.sem.acquire();
     let resp: UpstreamResponse;
     try {
-      resp = await this.upstream.do(path, body, clientStream);
+      // Relay the caller's opencode session id so Zen can optimize prompt
+      // caching per conversation (docs/go.md, "可以在哪里使用").
+      resp = await this.upstream.do(path, body, clientStream, callerSessionID(req));
     } finally {
       this.sem.release();
     }
@@ -644,6 +646,21 @@ function responsesKeepaliveEvent(): SseEvent {
 
 function isDeepSeekModel(model: string): boolean {
   return model.toLowerCase().startsWith("deepseek-");
+}
+
+/**
+ * Session identity for prompt-cache affinity: OpenCode / Codex send
+ * `x-opencode-session` per conversation, other OpenAI-compatible clients use
+ * the X-Session-Id / x-session-affinity convention (see opencode
+ * session/llm/request.ts). Empty when the caller sends nothing.
+ */
+export function callerSessionID(req: Request): string {
+  return (
+    req.headers.get("x-opencode-session") ??
+    req.headers.get("x-session-id") ??
+    req.headers.get("x-session-affinity") ??
+    ""
+  );
 }
 
 /**

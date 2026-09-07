@@ -25,6 +25,7 @@
 - socks5 代理、IPv6 优先、每请求新连接（`ZEN_SOCKS5` / `ZEN_IPV6_PREFER` / `ZEN_ROTATE_IP`）
 - 兼容模式：`ZEN_FORCE_CHAT_COMPLETIONS`（统一 chat 出站）、`ZEN_FORCE_CHAT_INBOUND`（只收 chat）
 - Codex / Responses 的内置工具类型自动过滤为 Zen 可接受的标准 `function` 工具
+- 调用方的 `x-opencode-session` 会话头自动转发到 zen 上游（兼容 `X-Session-Id` / `x-session-affinity`），帮助 Go 优化提示词缓存路由
 - 附赠 Status UI 状态页（模型 匿名 / API Key / 全部失败 实时展示）
 
 ## 快速开始

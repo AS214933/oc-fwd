@@ -102,7 +102,7 @@ export class UpstreamClient {
   }
 
   /** Run the full retry/circuit/fallback loop for one upstream call. */
-  async do(path: string, body: string, stream: boolean, signal?: AbortSignal): Promise<UpstreamResponse> {
+  async do(path: string, body: string, stream: boolean, sessionID = "", signal?: AbortSignal): Promise<UpstreamResponse> {
     const model = modelFromBody(body);
     this.fallback.noteCall(model);
     let attempt = 0;
@@ -133,7 +133,7 @@ export class UpstreamClient {
 
       let resp: UpstreamResponse;
       try {
-        resp = await this.rawRequest(path, body, stream, key, hasKey, signal);
+        resp = await this.rawRequest(path, body, stream, key, hasKey, sessionID, signal);
       } catch (err) {
         this.log.debug("upstream attempt failed", { attempt, error: String(err) });
         const wait = this.fastOrBackoff(attempt, 0);
@@ -261,6 +261,7 @@ export class UpstreamClient {
     stream: boolean,
     key: string,
     hasKey: boolean,
+    sessionID = "",
     signal?: AbortSignal,
   ): Promise<UpstreamResponse> {
     const url = this.cfg.upstreamBase + path;
@@ -275,6 +276,9 @@ export class UpstreamClient {
       Connection: "close",
     };
     if (hasKey) headers.Authorization = `Bearer ${key}`;
+    // Zen reads this header to optimize prompt-cache routing (docs/go.md);
+    // opencode / codex send it per conversation, so relay it verbatim.
+    if (sessionID) headers["x-opencode-session"] = sessionID;
 
     const request = buildRequest("POST", u.pathname + u.search, u.host, headers, body);
     return openUpstreamSocket(this.cfg, { host: u.hostname, port, timeoutMs: this.cfg.dialTimeoutMs }).then((tcp) =>

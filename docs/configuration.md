@@ -41,6 +41,15 @@
 
 Status UI 的变量见 [docs/status-ui.md](status-ui.md)。
 
+## 会话头转发
+
+调用方携带的会话标识会自动转发到 zen 上游，无需任何配置：
+
+- `x-opencode-session`：opencode / codex 每个会话发送的请求头，按 OpenCode Go 文档
+  [「可以在哪里使用」](https://opencode.ai/docs/zh-cn/go/#可以在哪里使用)的要求转发，帮助 Go 按会话优化提示词缓存路由
+- 其他 OpenAI 兼容客户端的 `X-Session-Id` / `x-session-affinity` 也会映射为 `x-opencode-session` 转发
+- 未携带任何会话头时不发送该头；`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 均支持
+
 ## 调用示例
 
 ```bash

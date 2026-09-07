@@ -1547,6 +1547,65 @@ describe("auth, models, aliases, force modes", () => {
   });
 });
 
+describe("session header relay", () => {
+  test("forwards x-opencode-session from the caller to the upstream", async () => {
+    mock.clear();
+    const res = await post(
+      { model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] },
+      "/v1/chat/completions",
+      { "x-opencode-session": "ses_test_123" },
+    );
+    expect(res.status).toBe(200);
+    expect(mock.last()?.headers.get("x-opencode-session")).toBe("ses_test_123");
+  });
+
+  test("falls back to X-Session-Id / x-session-affinity callers", async () => {
+    mock.clear();
+    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }, "/v1/chat/completions", {
+      "X-Session-Id": "sess_other_client",
+    });
+    expect(mock.last()?.headers.get("x-opencode-session")).toBe("sess_other_client");
+    mock.clear();
+    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] }, "/v1/chat/completions", {
+      "x-session-affinity": "sess_affinity_client",
+    });
+    expect(mock.last()?.headers.get("x-opencode-session")).toBe("sess_affinity_client");
+  });
+
+  test("omits the header entirely when the caller sends no session id", async () => {
+    mock.clear();
+    await post({ model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] });
+    expect(mock.last()?.headers.get("x-opencode-session")).toBeNull();
+  });
+
+  test("x-opencode-session takes precedence over other session headers", async () => {
+    mock.clear();
+    await post(
+      { model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }] },
+      "/v1/chat/completions",
+      { "x-opencode-session": "ses_primary", "x-session-id": "ses_secondary" },
+    );
+    expect(mock.last()?.headers.get("x-opencode-session")).toBe("ses_primary");
+  });
+
+  test("relays the session id through /v1/responses and /v1/messages too", async () => {
+    mock.clear();
+    await post(
+      { model: "deepseek-v4-flash-free", input: [{ role: "user", content: "hi" }], stream: false },
+      "/v1/responses",
+      { "x-opencode-session": "ses_responses" },
+    );
+    expect(mock.last()?.headers.get("x-opencode-session")).toBe("ses_responses");
+    mock.clear();
+    await post(
+      { model: "deepseek-v4-flash-free", messages: [{ role: "user", content: "hi" }], max_tokens: 8 },
+      "/v1/messages",
+      { "x-opencode-session": "ses_messages" },
+    );
+    expect(mock.last()?.headers.get("x-opencode-session")).toBe("ses_messages");
+  });
+});
+
 describe("health & debug", () => {
   test("healthz works", async () => {
     const { url: u } = await startProxy(config);
